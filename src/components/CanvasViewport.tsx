@@ -29,30 +29,66 @@ function getTabId() {
   catch { return `tab_${Math.random().toString(36).slice(2)}`; }
 }
 
+// deterministic-ish color per user
+function colorFor(id: string) {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) % 360;
+  return `hsl(${h}, 75%, 45%)`;
+}
+
 export default function CanvasViewport({ userId }: Props) {
   // ===== World offset (camera) & cursor displacement =====
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [cursor, setCursor] = useState({ dx: 0, dy: 0 });
+  const [screenCursor, setScreenCursor] = useState({ x: 0, y: 0 });
 
-  // refs that always hold "latest" values (avoid stale closure in rAF/publish)
+  // refs mirror latest values to avoid stale closures in rAF/broadcasts
   const offsetRef = useRef(offset);
   const cursorRef = useRef(cursor);
+  const screenCursorRef = useRef(screenCursor);
   useEffect(() => { offsetRef.current = offset; }, [offset]);
   useEffect(() => { cursorRef.current = cursor; }, [cursor]);
+  useEffect(() => { screenCursorRef.current = screenCursor; }, [screenCursor]);
 
-  // ===== Supabase presence channel (for tuples on the dashboard) =====
+  // ===== Supabase presence channel (for tuples & remote cursors) =====
   const tabIdRef = useRef(getTabId());
   const presenceChRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const rafRef = useRef<number | null>(null);
 
-  // Live-sync channel for shapes (broadcast fan-out)
-  const shapesChRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+  // email lookup (profiles)
+  const [profiles, setProfiles] = useState<Map<string, string>>(new Map());
+  useEffect(() => {
+    (async () => {
+      const { data } = await supabase.from("profiles").select("id,email");
+      if (data) setProfiles(new Map(data.map((r) => [r.id as string, (r.email as string) ?? ""])));
+    })();
+  }, []);
+
+  // --- remote cursors state (latest world coords per user) ---
+  type RemoteCursor = { worldX: number; worldY: number; at: number };
+  const [remoteCursors, setRemoteCursors] = useState<Map<string, RemoteCursor>>(new Map());
+
+  // prune stale cursors (no update in 4s)
+  useEffect(() => {
+    const t = setInterval(() => {
+      const now = Date.now();
+      setRemoteCursors((prev) => {
+        const m = new Map(prev);
+        for (const [uid, rc] of m) {
+          if (now - rc.at > 4000) m.delete(uid);
+        }
+        return m;
+      });
+    }, 1000);
+    return () => clearInterval(t);
+  }, []);
 
   // broadcast presence telemetry (coalesced with rAF)
   const publish = useCallback(() => {
     if (!presenceChRef.current) return;
     const { x, y } = offsetRef.current;
     const { dx, dy } = cursorRef.current;
+    const { x: cx, y: cy } = screenCursorRef.current;
     presenceChRef.current.send({
       type: "broadcast",
       event: "canvas-meta",
@@ -60,12 +96,16 @@ export default function CanvasViewport({ userId }: Props) {
         userId,
         tabId: tabIdRef.current,
         page: "canvas",
+        // camera & cursor deltas (for dashboard tuples)
         scrollX: Math.round(x),
         scrollY: Math.round(y),
         cursorDX: Math.round(dx),
         cursorDY: Math.round(dy),
         sumX: Math.round(x + dx),
         sumY: Math.round(y + dy),
+        // NEW: world-space cursor so others can render correctly
+        cursorWorldX: Math.round(x + cx),
+        cursorWorldY: Math.round(y + cy),
         at: new Date().toISOString(),
       },
     });
@@ -83,9 +123,34 @@ export default function CanvasViewport({ userId }: Props) {
     const ch = supabase.channel("presence:canvas", { config: { presence: { key: userId } } });
     presenceChRef.current = ch;
 
+    // receive others' telemetry for cursor rendering
+    ch.on("broadcast", { event: "canvas-meta" }, ({ payload }) => {
+      const p = payload as {
+        userId: string;
+        cursorWorldX?: number;
+        cursorWorldY?: number;
+        at?: string;
+        page?: string;
+      };
+      if (!p || !p.userId || p.userId === userId) return;
+      if (p.page !== "canvas") return;
+      if (typeof p.cursorWorldX !== "number" || typeof p.cursorWorldY !== "number") return;
+      setRemoteCursors((prev) => {
+        const m = new Map(prev);
+        m.set(p.userId, {
+          worldX: p.cursorWorldX!,
+          worldY: p.cursorWorldY!,
+          at: p.at ? Date.parse(p.at) : Date.now(),
+        });
+        return m;
+      });
+    });
+
     ch.subscribe(async (status) => {
       if (status === "SUBSCRIBED") {
-        try { await ch.track({ page: "canvas", tabId: tabIdRef.current, at: new Date().toISOString() }); } catch {}
+        try {
+          await ch.track({ page: "canvas", tabId: tabIdRef.current, at: new Date().toISOString() });
+        } catch {}
         publish(); // initial telemetry
       }
     });
@@ -113,6 +178,7 @@ export default function CanvasViewport({ userId }: Props) {
     const onMove = (e: MouseEvent) => {
       const cx = window.innerWidth / 2;
       const cy = window.innerHeight / 2;
+      setScreenCursor({ x: e.clientX, y: e.clientY });
       setCursor({ dx: e.clientX - cx, dy: e.clientY - cy });
       schedulePublish();
     };
@@ -147,7 +213,6 @@ export default function CanvasViewport({ userId }: Props) {
     const w = canvas.clientWidth;
     const h = canvas.clientHeight;
 
-    // Normalize to positive remainders so dots scroll with offset
     const ox = ((-offsetRef.current.x % GRID_SIZE) + GRID_SIZE) % GRID_SIZE;
     const oy = ((-offsetRef.current.y % GRID_SIZE) + GRID_SIZE) % GRID_SIZE;
 
@@ -230,53 +295,17 @@ export default function CanvasViewport({ userId }: Props) {
     });
   }, []);
 
-  // Initial load + realtime subscription to public.shapes
+  // Live-sync channel for shapes (broadcast fan-out)
+  const shapesChRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   useEffect(() => {
-    let active = true;
-
-    (async () => {
-      const { data, error } = await supabase
-        .from("shapes")
-        .select("*")
-        .order("updated_at", { ascending: true });
-      if (!active) return;
-      if (!error && data) {
-        setShapes(new Map(data.map((s: any) => [s.id, s as Shape])));
-      }
-    })();
-
-    const ch = supabase
-      .channel("db:shapes")
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "shapes" },
-        (msg: any) => {
-          const { eventType, new: rowNew, old: rowOld } = msg;
-          if (eventType === "INSERT" || eventType === "UPDATE") {
-            upsertShapeLocal(rowNew as Shape);
-          } else if (eventType === "DELETE") {
-            removeShapeLocal(rowOld.id as string);
-          }
-        }
-      )
-      .subscribe();
-
-    return () => { try { supabase.removeChannel(ch); } catch {} active = false; };
-  }, [upsertShapeLocal, removeShapeLocal]);
-
-  useEffect(() => {
-    const ch = supabase.channel("broadcast:shapes", {
-      config: { broadcast: { self: false } }, // don't echo my own events
-    });
+    const ch = supabase.channel("broadcast:shapes", { config: { broadcast: { self: false } } });
     shapesChRef.current = ch;
 
-    // A new shape was created elsewhere
-    ch.on("broadcast", { event: "shape-create" }, ({ payload }: { payload: (Shape & { tabId?: string }) }) => {
+    ch.on("broadcast", { event: "shape-create" }, ({ payload }: { payload: Shape }) => {
       upsertShapeLocal(payload as Shape);
     });
 
-    // A shape was moved elsewhere
-    ch.on("broadcast", { event: "shape-move" }, ({ payload }: { payload: { id: string; x: number; y: number; updated_at?: string; tabId?: string } }) => {
+    ch.on("broadcast", { event: "shape-move" }, ({ payload }: { payload: { id: string; x: number; y: number; updated_at?: string } }) => {
       setShapes(prev => {
         const m = new Map(prev);
         const s = m.get(payload.id);
@@ -286,7 +315,6 @@ export default function CanvasViewport({ userId }: Props) {
       });
     });
 
-    // (optional) deletion if you add that later
     ch.on("broadcast", { event: "shape-delete" }, ({ payload }: { payload: { id: string } }) => {
       removeShapeLocal(payload.id);
     });
@@ -300,6 +328,16 @@ export default function CanvasViewport({ userId }: Props) {
     };
   }, [upsertShapeLocal, removeShapeLocal]);
 
+  // Initial load from DB
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      const { data } = await supabase.from("shapes").select("*").order("updated_at", { ascending: true });
+      if (!active || !data) return;
+      setShapes(new Map(data.map((s: any) => [s.id, s as Shape])));
+    })();
+    return () => { active = false; };
+  }, []);
 
   // ===== World <-> Screen helpers =====
   const toWorld = (client: { x: number; y: number }) => ({
@@ -310,7 +348,6 @@ export default function CanvasViewport({ userId }: Props) {
   const pickShape = (clientX: number, clientY: number): Shape | null => {
     const { x: wx, y: wy } = toWorld({ x: clientX, y: clientY });
     const arr = Array.from(shapes.values());
-    // Top-most hit first (assuming later inserts render on top)
     for (let i = arr.length - 1; i >= 0; i--) {
       const s = arr[i];
       const minX = Math.min(s.x, s.x + s.width);
@@ -322,7 +359,7 @@ export default function CanvasViewport({ userId }: Props) {
     return null;
   };
 
-  // ===== Drag state (create or move) =====
+  // ===== Drag state (create / move) =====
   type DragState =
     | { kind: "none" }
     | { kind: "creating"; start: { x: number; y: number }; ghost: Shape }
@@ -347,11 +384,9 @@ export default function CanvasViewport({ userId }: Props) {
     const world = toWorld({ x: e.clientX, y: e.clientY });
 
     if (picked) {
-      // Start moving
       const grabOffset = { dx: world.x - picked.x, dy: world.y - picked.y };
       setDrag({ kind: "moving", id: picked.id, grabOffset });
     } else {
-      // Start creating a new rect (ghost)
       const ghost: Shape = {
         id: "ghost",
         created_by: userId,
@@ -381,7 +416,7 @@ export default function CanvasViewport({ userId }: Props) {
       const newX = world.x - drag.grabOffset.dx;
       const newY = world.y - drag.grabOffset.dy;
 
-      // Optimistic local update (existing code)
+      // Optimistic local update
       setShapes(prev => {
         const m = new Map(prev);
         const s = m.get(drag.id);
@@ -390,7 +425,7 @@ export default function CanvasViewport({ userId }: Props) {
         return m;
       });
 
-      // NEW: live broadcast so others update immediately
+      // Live broadcast so others update immediately
       shapesChRef.current?.send({
         type: "broadcast",
         event: "shape-move",
@@ -399,11 +434,10 @@ export default function CanvasViewport({ userId }: Props) {
           x: Math.round(newX),
           y: Math.round(newY),
           updated_at: new Date().toISOString(),
-          tabId: tabIdRef.current,
         },
       });
 
-      // Persist (existing)
+      // Persist (DB) for refresh resilience
       scheduleMoveUpdate(async () => {
         await supabase
           .from("shapes")
@@ -423,8 +457,8 @@ export default function CanvasViewport({ userId }: Props) {
       const nw = Math.abs(w);
       const nh = Math.abs(h);
       setDrag({ kind: "none" });
+
       if (nw >= 3 && nh >= 3) {
-        // 1) Create a stable client id
         const id = (typeof crypto !== "undefined" && "randomUUID" in crypto) ? crypto.randomUUID() : `shape_${Math.random().toString(36).slice(2)}`;
         const shape: Shape = {
           id,
@@ -436,18 +470,13 @@ export default function CanvasViewport({ userId }: Props) {
           updated_at: new Date().toISOString(),
         };
 
-        // 2) Optimistic local + broadcast so others see it instantly
+        // Optimistic + broadcast (instant to others)
         upsertShapeLocal(shape);
-        shapesChRef.current?.send({
-          type: "broadcast",
-          event: "shape-create",
-          payload: { ...shape, tabId: tabIdRef.current },
-        });
+        shapesChRef.current?.send({ type: "broadcast", event: "shape-create", payload: shape });
 
-        // 3) Persist to DB with the same id (so refresh works)
+        // Persist
         const { error } = await supabase.from("shapes").insert(shape);
         if (error) {
-          // optional rollback if insert fails
           console.warn("DB insert failed, rolling back local:", error);
           removeShapeLocal(id);
         }
@@ -456,6 +485,22 @@ export default function CanvasViewport({ userId }: Props) {
       setDrag({ kind: "none" });
     }
   }, [drag, userId, upsertShapeLocal, removeShapeLocal]);
+
+  // ===== Double-click delete =====
+  const onDoubleClickSVG = useCallback(async (e: React.MouseEvent<SVGSVGElement>) => {
+    if (drag.kind !== "none") return;
+    const hit = pickShape(e.clientX, e.clientY);
+    if (!hit) return;
+
+    removeShapeLocal(hit.id);
+    shapesChRef.current?.send({ type: "broadcast", event: "shape-delete", payload: { id: hit.id } });
+
+    const { error } = await supabase.from("shapes").delete().eq("id", hit.id);
+    if (error) {
+      upsertShapeLocal(hit);
+      console.warn("Delete failed:", error.message);
+    }
+  }, [drag, removeShapeLocal, upsertShapeLocal]);
 
   // ===== Render =====
   return (
@@ -480,6 +525,7 @@ export default function CanvasViewport({ userId }: Props) {
         onMouseDown={onLeftDown}
         onMouseMove={onLeftMove}
         onMouseUp={onLeftUp}
+        onDoubleClick={onDoubleClickSVG}
       >
         <g transform={`translate(${-offset.x}, ${-offset.y})`}>
           {Array.from(shapes.values()).map(s => (
@@ -513,14 +559,43 @@ export default function CanvasViewport({ userId }: Props) {
         </g>
       </svg>
 
+      {/* === Multiplayer cursors (screen-space overlay) === */}
+      <div className="absolute inset-0 pointer-events-none">
+        {Array.from(remoteCursors.entries()).map(([uid, rc]) => {
+          const sx = rc.worldX - offsetRef.current.x;
+          const sy = rc.worldY - offsetRef.current.y;
+          const email = profiles.get(uid) ?? uid.slice(0, 6);
+          const color = colorFor(uid);
+          return (
+            <div
+              key={uid}
+              className="absolute"
+              style={{ transform: `translate(${sx}px, ${sy}px)` }}
+            >
+              {/* cursor glyph */}
+              <svg width="14" height="20" viewBox="0 0 14 20" className="drop-shadow" style={{ display: "block" }}>
+                <path d="M1 1 L13 9 L8 10 L9.5 18 L6.5 18 L5 10 L1 9 Z" fill={color} opacity={0.95}/>
+                <path d="M1 1 L13 9 L8 10 L9.5 18 L6.5 18 L5 10 L1 9 Z" fill="none" stroke="black" strokeWidth="0.75"/>
+              </svg>
+              {/* label */}
+              <div
+                className="mt-[-2px] ml-[10px] rounded px-2 py-0.5 text-[11px] leading-[14px] text-white shadow"
+                style={{ backgroundColor: color }}
+              >
+                {email}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
       {/* Debug HUD (optional) */}
       <div className="absolute bottom-3 left-3 rounded bg-white/80 px-3 py-2 text-xs shadow">
         <div>scroll: ({Math.round(offset.x)}, {Math.round(offset.y)})</div>
         <div>cursorΔ: ({Math.round(cursor.dx)}, {Math.round(cursor.dy)})</div>
         <div>sum: ({Math.round(offset.x + cursor.dx)}, {Math.round(offset.y + cursor.dy)})</div>
-        <div className="opacity-60">Wheel pan • RMB drag pan • LMB create/move</div>
+        <div className="opacity-60">Wheel pan • RMB drag pan • LMB create/move • Dbl-click delete</div>
       </div>
     </div>
   );
 }
-

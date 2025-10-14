@@ -332,9 +332,15 @@ export default function CanvasViewport({ userId }: Props) {
   useEffect(() => {
     let active = true;
     (async () => {
-      const { data } = await supabase.from("shapes").select("*").order("updated_at", { ascending: true });
+      const { data } = await supabase
+        .from("shapes")
+        .select("*")
+        .order("updated_at", { ascending: true });
+
       if (!active || !data) return;
-      setShapes(new Map(data.map((s: any) => [s.id, s as Shape])));
+
+      const rows = data as unknown as Shape[];
+      setShapes(new Map(rows.map((s) => [s.id, s])));
     })();
     return () => { active = false; };
   }, []);
@@ -345,7 +351,7 @@ export default function CanvasViewport({ userId }: Props) {
     y: client.y + offsetRef.current.y,
   });
 
-  const pickShape = (clientX: number, clientY: number): Shape | null => {
+  const pickShape = useCallback((clientX: number, clientY: number): Shape | null => {
     const { x: wx, y: wy } = toWorld({ x: clientX, y: clientY });
     const arr = Array.from(shapes.values());
     for (let i = arr.length - 1; i >= 0; i--) {
@@ -357,7 +363,7 @@ export default function CanvasViewport({ userId }: Props) {
       if (wx >= minX && wx <= maxX && wy >= minY && wy <= maxY) return s;
     }
     return null;
-  };
+  }, [shapes]);
 
   // ===== Drag state (create / move) =====
   type DragState =
@@ -400,7 +406,7 @@ export default function CanvasViewport({ userId }: Props) {
       };
       setDrag({ kind: "creating", start: world, ghost });
     }
-  }, [userId, shapes]);
+  }, [userId, shapes, pickShape]);
 
   const onLeftMove = useCallback((e: React.MouseEvent<SVGSVGElement>) => {
     if (drag.kind === "none") return;
@@ -500,7 +506,7 @@ export default function CanvasViewport({ userId }: Props) {
       upsertShapeLocal(hit);
       console.warn("Delete failed:", error.message);
     }
-  }, [drag, removeShapeLocal, upsertShapeLocal]);
+  }, [drag, pickShape, removeShapeLocal, upsertShapeLocal]);
 
   // ===== Render =====
   return (

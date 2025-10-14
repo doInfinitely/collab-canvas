@@ -7,33 +7,37 @@ import { supabase } from "@/lib/supabase/client";
 export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [status, setStatus] = useState<string | null>(null);
-  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? "https://collab-canvas-72ykpex77-remy-ocheis-projects.vercel.app";
-  const origin =
-    typeof window !== "undefined"
-      ? window.location.origin
-      : (process.env.NEXT_PUBLIC_SITE_URL ?? "https://collab-canvas-72ykpex77-remy-ocheis-projects.vercel.app");
-
-  const redirectTo = `${origin}/auth/callback`;
 
   async function onMagicLink(e: FormEvent) {
     e.preventDefault();
     setStatus("Sending magic link…");
+    const origin =
+      typeof window !== "undefined"
+        ? window.location.origin
+        : process.env.NEXT_PUBLIC_SITE_URL!;
+    const redirectTo = `${origin}/auth/callback`;
     const { error } = await supabase.auth.signInWithOtp({
       email,
-      options: {
-        emailRedirectTo: `${siteUrl}/auth/callback`,
-      },
+      options: { emailRedirectTo: redirectTo },
     });
     setStatus(error ? `Error: ${error.message}` : "Check your email for a sign-in link.");
   }
 
 
   async function onGitHub() {
+    const origin =
+      typeof window !== "undefined"
+        ? window.location.origin
+        : process.env.NEXT_PUBLIC_SITE_URL!; // set in Vercel
+
+    const redirectTo = `${origin}/auth/callback`;
+
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "github",
       options: {
-        redirectTo,
-        flowType: "implicit", // <- avoids PKCE; tokens come back in the URL hash
+        redirectTo, // PKCE (default)
+        // scopes: "read:user", // optional
+        // queryParams: { prompt: "consent" }, // optional
       },
     });
     if (error) setStatus(`Error: ${error.message}`);

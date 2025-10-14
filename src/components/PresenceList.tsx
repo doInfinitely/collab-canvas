@@ -55,28 +55,60 @@ export default function PresenceList({ userId }: { userId: string }) {
       if (status === "SUBSCRIBED") dash.track({ at: new Date().toISOString() }).catch(() => {});
     });
 
-    // Canvas presence (collect per-user tuples; latest meta wins)
+    // create the channel
     const canvas = supabase.channel("presence:canvas", {
-      config: { presence: { key: userId } },
+      config: {
+        presence: { key: userId },
+        broadcast: { self: true }, // harmless for multi-user; helpful for solo tests
+      },
     });
-    canvasChRef.current = canvas;
 
-    const recomputeCanvas = () => {
+    // presence still used to know who’s on the canvas
+    const recomputeCanvasPresence = () => {
       const raw = canvas.presenceState() as Record<string, Array<CanvasMeta>>;
-      const m = new Map<string, CanvasMeta>();
-      for (const [uid, metas] of Object.entries(raw ?? {})) {
-        if (metas && metas.length) {
-          // pick the last meta (most recent tab)
-          m.set(uid, metas[metas.length - 1]);
+      setCanvasState((prev) => {
+        const m = new Map(prev);
+        // mark who is on canvas
+        for (const [uid, metas] of Object.entries(raw ?? {})) {
+          const last = metas?.[metas.length - 1] ?? {};
+          const ex = m.get(uid) ?? {};
+          m.set(uid, { ...ex, page: last.page ?? ex.page });
         }
-      }
-      setCanvasState(m);
+        // clear the page flag (but keep last numbers) for leavers
+        for (const uid of m.keys()) {
+          if (!raw?.[uid]) {
+            const ex = m.get(uid)!;
+            m.set(uid, { ...ex, page: undefined });
+          }
+        }
+        return m;
+      });
     };
 
-    canvas.on("presence", { event: "sync" }, recomputeCanvas);
-    canvas.on("presence", { event: "join" }, recomputeCanvas);
-    canvas.on("presence", { event: "leave" }, recomputeCanvas);
-    canvas.subscribe(); // not a Promise; no .catch()
+    canvas.on("presence", { event: "sync" }, recomputeCanvasPresence);
+    canvas.on("presence", { event: "join" }, recomputeCanvasPresence);
+    canvas.on("presence", { event: "leave" }, recomputeCanvasPresence);
+
+    canvas.on(
+      "broadcast",
+      { event: "canvas-meta" },
+      ({ payload }: { payload: (CanvasMeta & { userId: string }) }) => {
+        // Debug: prove we’re seeing the other user’s data
+        console.log("[PresenceList] rx broadcast from", payload.userId, payload);
+
+        setCanvasState((prev) => {
+          const m = new Map(prev);
+          const ex = m.get(payload.userId) ?? {};
+          // merge so we don't lose `page` (or any prior fields)
+          m.set(payload.userId, { ...ex, ...payload });
+          return m;
+        });
+      }
+    );
+
+    canvas.subscribe((status) => {
+      console.log("[PresenceList] subscribe status:", status);        // <— add this
+    });
 
     // cleanup
     return () => {

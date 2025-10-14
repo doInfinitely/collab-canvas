@@ -24,7 +24,7 @@ export default async function CanvasPage() {
   await supabase.from("profiles").upsert({ id: user.id, email: user.email ?? null });
 
   return (
-    <div className="h-[calc(100dvh-64px)]"> {/* header ~64px; adjust if needed */}
+    <div className="w-screen h-[calc(100vh-64px)]">
       <CanvasViewport userId={user.id} />
     </div>
   );

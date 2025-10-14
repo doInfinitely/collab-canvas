@@ -14,6 +14,7 @@ function getTabId() {
 export default function CanvasViewport({ userId }: Props) {
   // logical “camera” offset in pixels
   const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const gridCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const draggingRef = useRef(false);
   const lastRef = useRef({ x: 0, y: 0 }); // last mouse pos (for drag)
   const rafRef = useRef<number | null>(null);
@@ -23,22 +24,34 @@ export default function CanvasViewport({ userId }: Props) {
   // compute cursor displacement from viewport center
   const [cursor, setCursor] = useState({ dx: 0, dy: 0 });
 
-  // publish presence metadata (throttled via rAF)
+  // add refs that mirror state
+  const offsetRef = useRef(offset);
+  useEffect(() => { offsetRef.current = offset; }, [offset]);
+
+  const cursorRef = useRef(cursor);
+  useEffect(() => { cursorRef.current = cursor; }, [cursor]);
+
   const publish = () => {
     if (!channelRef.current) return;
-    const { x, y } = offset;
-    const { dx, dy } = cursor;
-    channelRef.current.track({
-      page: "canvas",
-      tabId: tabIdRef.current,
-      scrollX: Math.round(x),
-      scrollY: Math.round(y),
-      cursorDX: Math.round(dx),
-      cursorDY: Math.round(dy),
-      sumX: Math.round(x + dx),
-      sumY: Math.round(y + dy),
-      at: new Date().toISOString(),
-    }).catch(() => {});
+    const { x, y } = offsetRef.current;     // <-- use refs (fresh)
+    const { dx, dy } = cursorRef.current;   // <-- use refs (fresh)
+
+    channelRef.current.send({
+      type: "broadcast",
+      event: "canvas-meta",
+      payload: {
+        userId,
+        tabId: tabIdRef.current,
+        page: "canvas",
+        scrollX: Math.round(x),
+        scrollY: Math.round(y),
+        cursorDX: Math.round(dx),
+        cursorDY: Math.round(dy),
+        sumX: Math.round(x + dx),
+        sumY: Math.round(y + dy),
+        at: new Date().toISOString(),
+      },
+    });
   };
 
   const schedulePublish = () => {
@@ -49,15 +62,17 @@ export default function CanvasViewport({ userId }: Props) {
     });
   };
 
-  useEffect(() => {
-    const ch = supabase.channel("presence:canvas", { config: { presence: { key: userId } } });
-    channelRef.current = ch;
+    useEffect(() => {
+      const ch = supabase.channel("presence:canvas", { config: { presence: { key: userId } } });
+      channelRef.current = ch;
 
-    ch.subscribe((status) => {
-      if (status === "SUBSCRIBED") {
-        publish();
-      }
-    });
+      ch.subscribe(async (status) => {
+        console.log("[CanvasViewport] subscribe status:", status);    // <— add this
+        if (status === "SUBSCRIBED") {
+          try { await ch.track({ page: "canvas", tabId: tabIdRef.current, at: new Date().toISOString() }); } catch {}
+          publish(); // first telemetry
+        }
+      });
 
     // handle cleanup / tab closing
     const untrackAndClose = async () => {
@@ -151,19 +166,83 @@ export default function CanvasViewport({ userId }: Props) {
     };
   }, []);
 
-  // CSS background with infinite dot grid; we shift by background-position
-  const gridSize = 24; // px between dots
-  const grid = {
-    backgroundImage:
-      "radial-gradient(#9ca3af 1px, transparent 1px)", // gray-400 dots
-    backgroundSize: `${gridSize}px ${gridSize}px`,
-    backgroundPosition: `${-offset.x % gridSize}px ${-offset.y % gridSize}px`,
-  } as const;
+  // Draw a dot grid on a canvas
+  const gridSize = 24;           // spacing
+  const dotRadius = 1.5;         // dot size in px
+  const dotColor = "#9ca3af";    // gray-400
+
+  // In the resize effect, keep as-is but ensure we draw even if initial client size is 0
+  useEffect(() => {
+    const canvas = gridCanvasRef.current;
+    if (!canvas) return;
+
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+
+    const resize = () => {
+      // Guard against initial 0x0
+      const w = Math.max(1, canvas.clientWidth);
+      const h = Math.max(1, canvas.clientHeight);
+
+      canvas.width = Math.round(w * dpr);
+      canvas.height = Math.round(h * dpr);
+
+      const ctx = canvas.getContext("2d");
+      if (ctx) ctx.setTransform(dpr, 0, 0, dpr, 0, 0); // scale once per draw pass
+
+      drawGrid();
+    };
+
+    const ro = new ResizeObserver(resize);
+    ro.observe(canvas);
+
+    // Force a pass on the next frame (after layout)
+    requestAnimationFrame(resize);
+
+    return () => ro.disconnect();
+  }, []);
+
+  // Redraw when offset changes
+  useEffect(() => {
+    drawGrid();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [offset.x, offset.y]);
+
+  const drawGrid = () => {
+    const canvas = gridCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    // Clear the bitmap irrespective of the current transform
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.restore();
+
+    const w = canvas.clientWidth;
+    const h = canvas.clientHeight;
+
+    const ox = ((-offset.x % gridSize) + gridSize) % gridSize;
+    const oy = ((-offset.y % gridSize) + gridSize) % gridSize;
+
+    ctx.fillStyle = "#9ca3af"; // gray-400
+    for (let y = oy; y <= h; y += gridSize) {
+      for (let x = ox; x <= w; x += gridSize) {
+        ctx.beginPath();
+        ctx.arc(x, y, dotRadius, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  };
 
   return (
     <div className="relative h-full w-full overflow-hidden bg-white select-none">
-      {/* Dot grid layer */}
-      <div className="absolute inset-0" style={grid} />
+      {/* Dot grid layer (canvas) */}
+      <canvas
+        ref={gridCanvasRef}
+        className="absolute inset-0 block w-full h-full"
+        aria-hidden
+      />
       {/* Center crosshair (optional) */}
       <div className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-0.5 -translate-y-0.5">
         <div className="h-1 w-1 rounded-full bg-gray-400" />

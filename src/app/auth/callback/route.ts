@@ -28,7 +28,7 @@ export async function GET(req: Request) {
             cookieStore.delete(name);           // Next 13.4+ API
           } catch {
             // fallback: expire if delete isn't available in your channel
-            cookieStore.set(name, "", { maxAge: 0 } as any);
+            cookieStore.set({ name, value: "", maxAge: 0, path: "/" });
           }
         },
       },

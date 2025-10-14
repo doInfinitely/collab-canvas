@@ -11,14 +11,14 @@ export default function AuthCallback() {
 
   useEffect(() => {
     (async () => {
-      // 0) If we already have a session, bail out to dashboard.
+      // If we already have a session, bail out.
       const existing = await supabase.auth.getSession();
       if (existing.data.session) {
         router.replace("/dashboard");
         return;
       }
 
-      // 1) Implicit/hash flow: #access_token / #refresh_token
+      // 1) Implicit/hash flow: #access_token / #refresh_token (OAuth or magic link)
       const hash = window.location.hash?.startsWith("#")
         ? new URLSearchParams(window.location.hash.slice(1))
         : null;
@@ -28,12 +28,9 @@ export default function AuthCallback() {
       if (access_token && refresh_token) {
         const { error } = await supabase.auth.setSession({ access_token, refresh_token });
         if (!error) {
-          // Upsert the user's profile so they appear in the list
+          // ensure profile row
           const { data: { user } } = await supabase.auth.getUser();
-          if (user) {
-            await supabase.from("profiles").upsert({ id: user.id, email: user.email ?? null });
-          }
-
+          if (user) await supabase.from("profiles").upsert({ id: user.id, email: user.email ?? null });
           router.replace("/dashboard");
           return;
         }
@@ -41,30 +38,46 @@ export default function AuthCallback() {
         return;
       }
 
-      // 2) PKCE code flow
+      // 2) Query param ?code=... (can be OAuth PKCE OR email magic-link)
       const href = window.location.href;
       const search = new URLSearchParams(window.location.search);
       const code = search.get("code");
-      if (code) {
-        const { error } = await supabase.auth.exchangeCodeForSession(href);
-        if (!error) {
-          // Upsert the user's profile so they appear in the list
-          const { data: { user } } = await supabase.auth.getUser();
-          if (user) {
-            await supabase.from("profiles").upsert({ id: user.id, email: user.email ?? null });
-          }
+      const type = (search.get("type") || "").toLowerCase(); // 'magiclink', 'recovery', 'invite', 'signup', 'email_change', etc.
 
-          router.replace("/dashboard");
+      if (code) {
+        if (type) {
+          // === EMAIL / MAGIC-LINK path ===
+          // Supabase returns `?type=magiclink` (or recovery, etc.) with a token_hash in `code`
+          const { error } = await supabase.auth.verifyOtp({
+            type: type as any,      // 'magiclink' | 'recovery' | 'signup' | 'invite' | 'email_change'
+            token_hash: code,
+          });
+          if (!error) {
+            const { data: { user } } = await supabase.auth.getUser();
+            if (user) await supabase.from("profiles").upsert({ id: user.id, email: user.email ?? null });
+            router.replace("/dashboard");
+            return;
+          }
+          setMsg(`Auth error: ${error.message}`);
+          return;
+        } else {
+          // === OAUTH PKCE path === (GitHub, etc.)
+          const { error } = await supabase.auth.exchangeCodeForSession(href);
+          if (!error) {
+            const { data: { user } } = await supabase.auth.getUser();
+            if (user) await supabase.from("profiles").upsert({ id: user.id, email: user.email ?? null });
+            router.replace("/dashboard");
+            return;
+          }
+          // Double-check if session exists anyway (race)
+          const after = await supabase.auth.getSession();
+          if (after.data.session) {
+            router.replace("/dashboard");
+            return;
+          }
+          setMsg(`Auth error: ${error.message}`);
           return;
         }
-        // If verifier/state missing, we might *still* have a session (race or prior login)
-        const after = await supabase.auth.getSession();
-        if (after.data.session) {
-          router.replace("/dashboard");
-          return;
-        }
-        setMsg(`Auth error: ${error.message}`);
-        return;
       }
 
       // 3) Nothing to do

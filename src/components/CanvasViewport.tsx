@@ -45,6 +45,9 @@ export default function CanvasViewport({ userId }: Props) {
   const presenceChRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const rafRef = useRef<number | null>(null);
 
+  // Live-sync channel for shapes (broadcast fan-out)
+  const shapesChRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+
   // broadcast presence telemetry (coalesced with rAF)
   const publish = useCallback(() => {
     if (!presenceChRef.current) return;
@@ -261,6 +264,43 @@ export default function CanvasViewport({ userId }: Props) {
     return () => { try { supabase.removeChannel(ch); } catch {} active = false; };
   }, [upsertShapeLocal, removeShapeLocal]);
 
+  useEffect(() => {
+    const ch = supabase.channel("broadcast:shapes", {
+      config: { broadcast: { self: false } }, // don't echo my own events
+    });
+    shapesChRef.current = ch;
+
+    // A new shape was created elsewhere
+    ch.on("broadcast", { event: "shape-create" }, ({ payload }: { payload: (Shape & { tabId?: string }) }) => {
+      upsertShapeLocal(payload as Shape);
+    });
+
+    // A shape was moved elsewhere
+    ch.on("broadcast", { event: "shape-move" }, ({ payload }: { payload: { id: string; x: number; y: number; updated_at?: string; tabId?: string } }) => {
+      setShapes(prev => {
+        const m = new Map(prev);
+        const s = m.get(payload.id);
+        if (!s) return prev;
+        m.set(payload.id, { ...s, x: Math.round(payload.x), y: Math.round(payload.y), updated_at: payload.updated_at ?? s.updated_at });
+        return m;
+      });
+    });
+
+    // (optional) deletion if you add that later
+    ch.on("broadcast", { event: "shape-delete" }, ({ payload }: { payload: { id: string } }) => {
+      removeShapeLocal(payload.id);
+    });
+
+    ch.subscribe();
+
+    return () => {
+      try { ch.unsubscribe(); } catch {}
+      try { supabase.removeChannel(ch); } catch {}
+      shapesChRef.current = null;
+    };
+  }, [upsertShapeLocal, removeShapeLocal]);
+
+
   // ===== World <-> Screen helpers =====
   const toWorld = (client: { x: number; y: number }) => ({
     x: client.x + offsetRef.current.x,
@@ -341,7 +381,7 @@ export default function CanvasViewport({ userId }: Props) {
       const newX = world.x - drag.grabOffset.dx;
       const newY = world.y - drag.grabOffset.dy;
 
-      // Optimistic local update
+      // Optimistic local update (existing code)
       setShapes(prev => {
         const m = new Map(prev);
         const s = m.get(drag.id);
@@ -350,7 +390,20 @@ export default function CanvasViewport({ userId }: Props) {
         return m;
       });
 
-      // Persist (anyone can move shapes — your RLS policy allows it)
+      // NEW: live broadcast so others update immediately
+      shapesChRef.current?.send({
+        type: "broadcast",
+        event: "shape-move",
+        payload: {
+          id: drag.id,
+          x: Math.round(newX),
+          y: Math.round(newY),
+          updated_at: new Date().toISOString(),
+          tabId: tabIdRef.current,
+        },
+      });
+
+      // Persist (existing)
       scheduleMoveUpdate(async () => {
         await supabase
           .from("shapes")
@@ -365,26 +418,44 @@ export default function CanvasViewport({ userId }: Props) {
       const g = drag.ghost;
       const w = Math.round(g.width);
       const h = Math.round(g.height);
-      // Normalize so x,y is top-left and width/height positive
       const nx = Math.round(w >= 0 ? g.x : g.x + w);
       const ny = Math.round(h >= 0 ? g.y : g.y + h);
       const nw = Math.abs(w);
       const nh = Math.abs(h);
       setDrag({ kind: "none" });
-
       if (nw >= 3 && nh >= 3) {
-        const { data, error } = await supabase.from("shapes").insert({
+        // 1) Create a stable client id
+        const id = (typeof crypto !== "undefined" && "randomUUID" in crypto) ? crypto.randomUUID() : `shape_${Math.random().toString(36).slice(2)}`;
+        const shape: Shape = {
+          id,
           created_by: userId,
           x: nx, y: ny, width: nw, height: nh,
-          stroke: "#000000", stroke_width: 2, fill: "#ffffff",
+          stroke: "#000000",
+          stroke_width: 2,
+          fill: "#ffffff",
           updated_at: new Date().toISOString(),
-        }).select().single();
-        if (!error && data) upsertShapeLocal(data as Shape);
+        };
+
+        // 2) Optimistic local + broadcast so others see it instantly
+        upsertShapeLocal(shape);
+        shapesChRef.current?.send({
+          type: "broadcast",
+          event: "shape-create",
+          payload: { ...shape, tabId: tabIdRef.current },
+        });
+
+        // 3) Persist to DB with the same id (so refresh works)
+        const { error } = await supabase.from("shapes").insert(shape);
+        if (error) {
+          // optional rollback if insert fails
+          console.warn("DB insert failed, rolling back local:", error);
+          removeShapeLocal(id);
+        }
       }
     } else if (drag.kind === "moving") {
       setDrag({ kind: "none" });
     }
-  }, [drag, upsertShapeLocal, userId]);
+  }, [drag, userId, upsertShapeLocal, removeShapeLocal]);
 
   // ===== Render =====
   return (

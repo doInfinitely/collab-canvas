@@ -41,5 +41,32 @@ export async function GET(req: Request) {
       return NextResponse.redirect(new URL("/login?error=missing_code", url.origin), 303);
     }
 
-    if (looksLike
+    if (looksLikeOtp) {
+      const allowed = new Set<OtpType>(["magiclink","recovery","signup","invite","email_change"]);
+      const candidate = (typeParam ?? "magiclink") as OtpType;
+      const otpType: OtpType = allowed.has(candidate) ? candidate : "magiclink";
+
+      const token = (tokenHash ?? code)!;
+
+      const { error } = await supabase.auth.verifyOtp({
+        type: otpType,
+        token_hash: token,
+      });
+      if (error) throw error;
+    } else {
+      const { error } = await supabase.auth.exchangeCodeForSession(req.url);
+      if (error) throw error;
+    }
+
+    const { data: { user } } = await supabase.auth.getUser();
+    if (user) {
+      await supabase.from("profiles").upsert({ id: user.id, email: user.email ?? null });
+    }
+
+    return NextResponse.redirect(new URL("/dashboard", url.origin), 303);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "callback_failed";
+    return NextResponse.redirect(new URL(`/login?error=${encodeURIComponent(msg)}`, url.origin), 303);
+  }
+}
 

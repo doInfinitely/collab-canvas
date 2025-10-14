@@ -48,8 +48,21 @@ export default function AuthCallback() {
         if (type) {
           // === EMAIL / MAGIC-LINK path ===
           // Supabase returns `?type=magiclink` (or recovery, etc.) with a token_hash in `code`
+          type OtpType = "magiclink" | "recovery" | "signup" | "invite" | "email_change";
+          const allowed: readonly OtpType[] = [
+            "magiclink",
+            "recovery",
+            "signup",
+            "invite",
+            "email_change",
+          ] as const;
+
+          const otpType: OtpType = (allowed.includes(type as OtpType)
+            ? (type as OtpType)
+            : "magiclink");
+
           const { error } = await supabase.auth.verifyOtp({
-            type: type as any,      // 'magiclink' | 'recovery' | 'signup' | 'invite' | 'email_change'
+            type: otpType,
             token_hash: code,
           });
           if (!error) {

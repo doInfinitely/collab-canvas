@@ -7,11 +7,11 @@ import { supabase } from "@/lib/supabase/client";
 export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [status, setStatus] = useState<string | null>(null);
-  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000";
+  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? "https://collab-canvas-72ykpex77-remy-ocheis-projects.vercel.app";
   const origin =
     typeof window !== "undefined"
       ? window.location.origin
-      : (process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000");
+      : (process.env.NEXT_PUBLIC_SITE_URL ?? "https://collab-canvas-72ykpex77-remy-ocheis-projects.vercel.app");
 
   const redirectTo = `${origin}/auth/callback`;
 

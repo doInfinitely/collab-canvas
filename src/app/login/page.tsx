@@ -32,7 +32,8 @@ export default function LoginPage() {
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "github",
       options: {
-        redirectTo
+        redirectTo,
+        flowType: "implicit", // <- avoids PKCE; tokens come back in the URL hash
       },
     });
     if (error) setStatus(`Error: ${error.message}`);

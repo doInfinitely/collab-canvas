@@ -869,6 +869,18 @@ export default function CanvasViewport({ userId }: Props) {
       });
     });
 
+    ch.on("broadcast", { event: "annotation-delete" }, ({ payload }) => {
+      const { id, shape_id } = payload as { id: string; shape_id: string };
+      if (!id || !shape_id) return;
+      setAnnotationsByShape(prev => {
+        const m = new Map(prev);
+        const curr = m.get(shape_id) ?? [];
+        m.set(shape_id, curr.filter(a => a.id !== id));
+        return m;
+      });
+    });
+
+
     ch.subscribe();
     return () => {
       try { ch.unsubscribe(); } catch {}
@@ -880,22 +892,35 @@ export default function CanvasViewport({ userId }: Props) {
   const openModalForShape = useCallback(async (shapeId: string) => {
     setModalShapeId(shapeId);
     setAnnotationInput("");
-    // Load annotations from DB (best effort)
+
     try {
       const { data, error } = await supabase
         .from("shape_annotations")
         .select("id,shape_id,user_id,text,created_at")
         .eq("shape_id", shapeId)
         .order("created_at", { ascending: true });
+
       if (!error && data) {
+        const incoming = (data as Annotation[]).filter(a => a.text && a.text.trim().length > 0);
+
         setAnnotationsByShape(prev => {
+          // merge existing + incoming by id (incoming wins on conflicts)
+          const existing = prev.get(shapeId) ?? [];
+          const byId = new Map<string, Annotation>();
+          for (const a of existing) byId.set(a.id, a);
+          for (const a of incoming) byId.set(a.id, a);
+
+          const merged = Array.from(byId.values()).sort(
+            (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+          );
+
           const m = new Map(prev);
-          m.set(shapeId, (data as Annotation[]).filter(a => a.text && a.text.trim().length > 0));
+          m.set(shapeId, merged);
           return m;
         });
       }
+      // If there’s an error, we keep existing optimistic/broadcast state—no overwrite.
     } catch (err) {
-      // If table doesn't exist or user lacks perms, ignore—broadcasts still work
       console.warn("Annotation fetch skipped:", err);
     }
   }, []);
@@ -952,6 +977,54 @@ export default function CanvasViewport({ userId }: Props) {
       // keep optimistic state so multiuser via broadcast still shows it
     }
   }, [annotationInput, modalShapeId, userId]);
+
+  const deleteAnnotation = useCallback(async (annotationId: string, shapeId: string) => {
+    // Find the annotation we're deleting (for rollback if needed)
+    const prev = annotationsByShape.get(shapeId) ?? [];
+    const toRestore = prev.find(a => a.id === annotationId);
+    if (!toRestore) return;
+
+    // Only allow the author to delete (client-side guard; keep server-side RLS too)
+    if (toRestore.user_id !== userId) return;
+
+    // Optimistic remove
+    setAnnotationsByShape(prevMap => {
+      const m = new Map(prevMap);
+      m.set(shapeId, (m.get(shapeId) ?? []).filter(a => a.id !== annotationId));
+      return m;
+    });
+
+    // Broadcast to other clients
+    annotationsChRef.current?.send({
+      type: "broadcast",
+      event: "annotation-delete",
+      payload: { id: annotationId, shape_id: shapeId },
+    });
+
+    // Persist (best effort)
+    const { error } = await supabase
+      .from("shape_annotations")
+      .delete()
+      .eq("id", annotationId)
+      .eq("user_id", userId); // enforce author-only deletes
+
+    if (error) {
+      console.warn("Annotation delete failed:", error.message);
+      // Roll back
+      setAnnotationsByShape(prevMap => {
+        const m = new Map(prevMap);
+        const arr = m.get(shapeId) ?? [];
+        // Reinsert if it’s still missing
+        if (!arr.some(a => a.id === toRestore.id)) {
+          m.set(shapeId, [...arr, toRestore].sort(
+            (a,b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+          ));
+        }
+        return m;
+      });
+    }
+  }, [annotationsByShape, userId]);
+
 
   // ===== Render =====
   return (
@@ -1123,16 +1196,35 @@ export default function CanvasViewport({ userId }: Props) {
                     <div className="p-3 text-sm text-gray-500">No annotations yet.</div>
                   ) : (
                     <ul className="divide-y divide-gray-100">
-                      {anns.filter(a => a.text && a.text.trim().length > 0).map(a => {
-                        const author = profiles.get(a.user_id) ?? a.user_id;
-                        return (
-                          <li key={a.id} className="p-3 text-sm">
-                            <div className="mb-1 font-medium">{author}</div>
-                            <div className="whitespace-pre-wrap">{a.text}</div>
-                            <div className="mt-1 text-xs text-gray-400">{new Date(a.created_at).toLocaleString()}</div>
-                          </li>
-                        );
-                      })}
+                      {anns
+                        .filter(a => a.text && a.text.trim().length > 0)
+                        .map(a => {
+                          const author = profiles.get(a.user_id) ?? a.user_id;
+                          const isMine = a.user_id === userId;
+                          return (
+                            <li key={a.id} className="p-3 text-sm">
+                              {/* Header row: author on the left, delete on the right */}
+                              <div className="mb-1 flex items-center justify-between gap-2">
+                                <div className="font-medium">{author}</div>
+                                {isMine && (
+                                  <button
+                                    className="inline-flex h-6 min-w-[1.5rem] items-center justify-center rounded px-2 text-xs text-gray-500 hover:bg-gray-100 hover:text-gray-800"
+                                    aria-label="Delete annotation"
+                                    title="Delete annotation"
+                                    onClick={() => deleteAnnotation(a.id, a.shape_id)}
+                                  >
+                                    ✕
+                                  </button>
+                                )}
+                              </div>
+
+                              <div className="whitespace-pre-wrap">{a.text}</div>
+                              <div className="mt-1 text-xs text-gray-400">
+                                {new Date(a.created_at).toLocaleString()}
+                              </div>
+                            </li>
+                          );
+                        })}
                     </ul>
                   )}
                 </div>

@@ -131,6 +131,9 @@ export default function CanvasViewport({ userId }: Props) {
     return () => clearInterval(t);
   }, []);
 
+  // Debug HUD visibility
+  const [showDebug, setShowDebug] = useState(true);
+
   // broadcast presence telemetry (coalesced with rAF)
   const publish = useCallback(() => {
     if (!presenceChRef.current) return;
@@ -802,6 +805,7 @@ export default function CanvasViewport({ userId }: Props) {
   // Global key handler for Cmd/Ctrl + X/C/V
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Ignore if typing in inputs/contenteditable
       const target = e.target as HTMLElement | null;
       if (target && (
         target.tagName === "INPUT" ||
@@ -809,6 +813,14 @@ export default function CanvasViewport({ userId }: Props) {
         (target as HTMLElement).isContentEditable
       )) return;
 
+      // Toggle Debug HUD on '?'
+      if (e.key === "?" || (e.key === "/" && e.shiftKey)) {
+        e.preventDefault();
+        setShowDebug(v => !v);
+        return;
+      }
+
+      // ===== existing copy/cut/paste below =====
       const mod = e.metaKey || e.ctrlKey;
       if (!mod) return;
 
@@ -1156,16 +1168,18 @@ export default function CanvasViewport({ userId }: Props) {
       })()}
 
       {/* Debug HUD (optional) */}
-      <div className="absolute bottom-3 left-3 rounded bg-white/80 px-3 py-2 text-xs shadow">
-        <div>scroll: ({Math.round(offset.x)}, {Math.round(offset.y)})</div>
-        <div>zoom: {scale.toFixed(2)}×</div>
-        <div>cursorΔ: ({Math.round(cursor.dx)}, {Math.round(cursor.dy)})</div>
-        <div>sum: ({Math.round(offset.x + cursor.dx)}, {Math.round(offset.y + cursor.dy)})</div>
-        <div className="opacity-60">
-          Wheel pan • RMB pan • Ctrl/Cmd+Wheel zoom • LMB create/move • Dbl-click delete (sel=all) • Shift+Click select • Shift+Drag (bg) marquee • Cmd/Ctrl+C/X/V • RMB on rect → Properties
+      {showDebug && (
+        <div className="absolute bottom-3 left-3 rounded bg-white/80 px-3 py-2 text-xs shadow">
+          <div>scroll: ({Math.round(offset.x)}, {Math.round(offset.y)})</div>
+          <div>zoom: {scale.toFixed(2)}×</div>
+          <div>cursorΔ: ({Math.round(cursor.dx)}, {Math.round(cursor.dy)})</div>
+          <div>sum: ({Math.round(offset.x + cursor.dx)}, {Math.round(offset.y + cursor.dy)})</div>
+          <div className="opacity-60">
+            Wheel pan • RMB pan • Ctrl/Cmd+Wheel zoom • LMB create/move • Dbl-click delete (sel=all) • Shift+Click select • Shift+Drag (bg) marquee • Cmd/Ctrl+C/X/V • RMB on rect → Properties • ? toggles HUD
+          </div>
         </div>
-      </div>
-    </div>
+      )}
+     </div>
   );
 }
 

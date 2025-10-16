@@ -19,6 +19,14 @@ type Shape = {
   updated_at?: string;
 };
 
+type Annotation = {
+  id: string;
+  shape_id: string;
+  user_id: string;
+  text: string;
+  created_at: string;
+};
+
 // -------- Canvas config (grid) --------
 const GRID_SIZE = 24;
 const DOT_RADIUS = 1.5;
@@ -713,7 +721,6 @@ export default function CanvasViewport({ userId }: Props) {
     const shapesToCopy = ids
       .map((id) => shapesRef.current.get(id))
       .filter(Boolean) as Shape[];
-    // Store deep copies (positions preserved)
     clipboardRef.current = shapesToCopy.map(s => ({ ...s }));
   }, []);
 
@@ -725,10 +732,8 @@ export default function CanvasViewport({ userId }: Props) {
       .map((id) => shapesRef.current.get(id))
       .filter(Boolean) as Shape[];
 
-    // Put copies into clipboard
     clipboardRef.current = shapesToCut.map(s => ({ ...s }));
 
-    // Optimistic remove local + broadcast
     setShapes(prev => {
       const m = new Map(prev);
       for (const id of ids) m.delete(id);
@@ -738,10 +743,8 @@ export default function CanvasViewport({ userId }: Props) {
       shapesChRef.current?.send({ type: "broadcast", event: "shape-delete", payload: { id } });
     }
 
-    // Persist delete
     const { error } = await supabase.from("shapes").delete().in("id", ids);
     if (error) {
-      // Roll back on failure
       console.warn("Cut delete failed:", error.message);
       setShapes(prev => {
         const m = new Map(prev);
@@ -749,7 +752,6 @@ export default function CanvasViewport({ userId }: Props) {
         return m;
       });
     }
-    // Clear selection after cut
     setSelectedIds(new Set());
   }, []);
 
@@ -757,14 +759,13 @@ export default function CanvasViewport({ userId }: Props) {
     const clip = clipboardRef.current;
     if (!clip || clip.length === 0) return;
 
-    const target = worldCursor(); // where the user’s cursor is right now (world coords)
+    const target = worldCursor();
     const bb = bboxOf(clip);
     if (!bb) return;
 
     const dx = target.x - bb.cx;
     const dy = target.y - bb.cy;
 
-    // Create new shapes with new IDs, shifted so group center = cursor
     const now = new Date().toISOString();
     const newShapes: Shape[] = clip.map((s) => ({
       ...s,
@@ -775,7 +776,6 @@ export default function CanvasViewport({ userId }: Props) {
       updated_at: now,
     }));
 
-    // Optimistic local + broadcast
     setShapes(prev => {
       const m = new Map(prev);
       for (const s of newShapes) m.set(s.id, s);
@@ -785,11 +785,9 @@ export default function CanvasViewport({ userId }: Props) {
       shapesChRef.current?.send({ type: "broadcast", event: "shape-create", payload: s });
     }
 
-    // Persist (batch insert)
     const { error } = await supabase.from("shapes").insert(newShapes);
     if (error) {
       console.warn("Paste insert failed:", error.message);
-      // Roll back newly added if DB failed
       setShapes(prev => {
         const m = new Map(prev);
         for (const s of newShapes) m.delete(s.id);
@@ -798,14 +796,12 @@ export default function CanvasViewport({ userId }: Props) {
       return;
     }
 
-    // Select the newly pasted shapes
     setSelectedIds(new Set(newShapes.map((s) => s.id)));
   }, [userId]);
 
   // Global key handler for Cmd/Ctrl + X/C/V
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      // Ignore if typing in inputs/contenteditable
       const target = e.target as HTMLElement | null;
       if (target && (
         target.tagName === "INPUT" ||
@@ -832,6 +828,118 @@ export default function CanvasViewport({ userId }: Props) {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [doCopy, doCut, doPaste]);
+
+  // ===== Right-click Properties & Annotations modal =====
+  const [modalShapeId, setModalShapeId] = useState<string | null>(null);
+  const [annotationInput, setAnnotationInput] = useState("");
+  const [annotationsByShape, setAnnotationsByShape] = useState<
+    Map<string, Annotation[]>
+  >(new Map());
+
+  const annotationsChRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+
+  // subscribe to annotation broadcasts
+  useEffect(() => {
+    const ch = supabase.channel("broadcast:annotations", { config: { broadcast: { self: false } } });
+    annotationsChRef.current = ch;
+
+    ch.on("broadcast", { event: "annotation-upsert" }, ({ payload }) => {
+      const ann = payload as Annotation;
+      if (!ann || !ann.shape_id || !ann.text) return;
+      setAnnotationsByShape(prev => {
+        const m = new Map(prev);
+        const curr = m.get(ann.shape_id) ?? [];
+        // de-dupe by id
+        const idx = curr.findIndex(a => a.id === ann.id);
+        if (idx >= 0) curr[idx] = ann; else curr.push(ann);
+        m.set(ann.shape_id, [...curr].sort((a,b)=> new Date(a.created_at).getTime() - new Date(b.created_at).getTime()));
+        return m;
+      });
+    });
+
+    ch.subscribe();
+    return () => {
+      try { ch.unsubscribe(); } catch {}
+      try { supabase.removeChannel(ch); } catch {}
+      annotationsChRef.current = null;
+    };
+  }, []);
+
+  const openModalForShape = useCallback(async (shapeId: string) => {
+    setModalShapeId(shapeId);
+    setAnnotationInput("");
+    // Load annotations from DB (best effort)
+    try {
+      const { data, error } = await supabase
+        .from("shape_annotations")
+        .select("id,shape_id,user_id,text,created_at")
+        .eq("shape_id", shapeId)
+        .order("created_at", { ascending: true });
+      if (!error && data) {
+        setAnnotationsByShape(prev => {
+          const m = new Map(prev);
+          m.set(shapeId, (data as Annotation[]).filter(a => a.text && a.text.trim().length > 0));
+          return m;
+        });
+      }
+    } catch (err) {
+      // If table doesn't exist or user lacks perms, ignore—broadcasts still work
+      console.warn("Annotation fetch skipped:", err);
+    }
+  }, []);
+
+  const closeModal = useCallback(() => {
+    setModalShapeId(null);
+    setAnnotationInput("");
+  }, []);
+
+  // Handle ESC to close
+  useEffect(() => {
+    const onEsc = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeModal();
+    };
+    window.addEventListener("keydown", onEsc);
+    return () => window.removeEventListener("keydown", onEsc);
+  }, [closeModal]);
+
+  // Right-click on a rect → open modal (without interfering with RMB drag)
+  const onRectContextMenu = useCallback((e: React.MouseEvent<SVGRectElement>, id: string) => {
+    e.preventDefault(); // block browser menu
+    e.stopPropagation();
+    openModalForShape(id);
+  }, [openModalForShape]);
+
+  const addAnnotation = useCallback(async () => {
+    const text = annotationInput.trim();
+    if (!text || !modalShapeId) return;
+    const now = new Date().toISOString();
+    const ann: Annotation = {
+      id: (typeof crypto !== "undefined" && "randomUUID" in crypto) ? crypto.randomUUID() : `ann_${Math.random().toString(36).slice(2)}`,
+      shape_id: modalShapeId,
+      user_id: userId,
+      text,
+      created_at: now,
+    };
+
+    // optimistic add
+    setAnnotationsByShape(prev => {
+      const m = new Map(prev);
+      const curr = m.get(modalShapeId) ?? [];
+      m.set(modalShapeId, [...curr, ann]);
+      return m;
+    });
+    setAnnotationInput("");
+
+    // broadcast
+    annotationsChRef.current?.send({ type: "broadcast", event: "annotation-upsert", payload: ann });
+
+    // persist (best effort)
+    const { error } = await supabase.from("shape_annotations").insert(ann as any);
+    if (error) {
+      console.warn("Annotation insert failed:", error.message);
+      // keep optimistic state so multiuser via broadcast still shows it
+    }
+  }, [annotationInput, modalShapeId, userId]);
 
   // ===== Render =====
   return (
@@ -879,6 +987,7 @@ export default function CanvasViewport({ userId }: Props) {
               pointerEvents="all"
               style={{ cursor: "move" }}
               filter={selectedIds.has(s.id) ? "url(#selGlow)" : undefined}
+              onContextMenu={(e) => onRectContextMenu(e, s.id)}
             />
           ))}
 
@@ -950,6 +1059,102 @@ export default function CanvasViewport({ userId }: Props) {
         })}
       </div>
 
+      {/* Properties & Annotations Modal */}
+      {modalShapeId && (() => {
+        const s = shapesRef.current.get(modalShapeId);
+        const email = profiles.get(userId) ?? userId;
+        const anns = annotationsByShape.get(modalShapeId) ?? [];
+        if (!s) return null;
+        return (
+          <div
+            className="absolute inset-0 z-50 flex items-center justify-center"
+            aria-modal
+            role="dialog"
+          >
+            {/* backdrop */}
+            <div
+              className="absolute inset-0 bg-black/40"
+              onClick={closeModal}
+            />
+            {/* modal card */}
+            <div className="relative z-10 w-[520px] max-w-[92vw] rounded-2xl bg-white p-5 shadow-xl">
+              <div className="mb-3 flex items-center justify-between">
+                <h2 className="text-lg font-semibold">Rectangle Properties</h2>
+                <button
+                  className="rounded-md px-2 py-1 text-sm text-gray-600 hover:bg-gray-100"
+                  onClick={closeModal}
+                  aria-label="Close properties"
+                >
+                  ✕
+                </button>
+              </div>
+
+              {/* Properties */}
+              <div className="grid grid-cols-2 gap-3 text-sm">
+                <div><span className="text-gray-500">ID:</span> {s.id}</div>
+                <div><span className="text-gray-500">Owner:</span> {s.created_by}</div>
+                <div><span className="text-gray-500">X:</span> {s.x}</div>
+                <div><span className="text-gray-500">Y:</span> {s.y}</div>
+                <div><span className="text-gray-500">Width:</span> {s.width}</div>
+                <div><span className="text-gray-500">Height:</span> {s.height}</div>
+                <div><span className="text-gray-500">Stroke:</span> {s.stroke}</div>
+                <div><span className="text-gray-500">Stroke width:</span> {s.stroke_width}</div>
+                <div className="col-span-2"><span className="text-gray-500">Fill:</span> {s.fill ?? "none"}</div>
+                {s.updated_at && <div className="col-span-2"><span className="text-gray-500">Updated:</span> {new Date(s.updated_at).toLocaleString()}</div>}
+              </div>
+
+              {/* Annotations */}
+              <div className="mt-5">
+                <h3 className="mb-2 text-sm font-medium">Annotations</h3>
+                <div className="max-h-48 overflow-auto rounded border border-gray-200">
+                  {anns.length === 0 ? (
+                    <div className="p-3 text-sm text-gray-500">No annotations yet.</div>
+                  ) : (
+                    <ul className="divide-y divide-gray-100">
+                      {anns.filter(a => a.text && a.text.trim().length > 0).map(a => {
+                        const author = profiles.get(a.user_id) ?? a.user_id;
+                        return (
+                          <li key={a.id} className="p-3 text-sm">
+                            <div className="mb-1 font-medium">{author}</div>
+                            <div className="whitespace-pre-wrap">{a.text}</div>
+                            <div className="mt-1 text-xs text-gray-400">{new Date(a.created_at).toLocaleString()}</div>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                </div>
+
+                <div className="mt-3">
+                  <label className="mb-1 block text-xs text-gray-600">Add annotation (as {email})</label>
+                  <textarea
+                    className="h-20 w-full rounded-md border border-gray-300 p-2 text-sm outline-none focus:border-blue-500"
+                    placeholder="Type a note…"
+                    value={annotationInput}
+                    onChange={(e) => setAnnotationInput(e.target.value)}
+                  />
+                  <div className="mt-2 flex items-center justify-end gap-2">
+                    <button
+                      className="rounded-md px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-100"
+                      onClick={closeModal}
+                    >
+                      Close
+                    </button>
+                    <button
+                      className="rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+                      onClick={addAnnotation}
+                      disabled={!annotationInput.trim()}
+                    >
+                      Save annotation
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* Debug HUD (optional) */}
       <div className="absolute bottom-3 left-3 rounded bg-white/80 px-3 py-2 text-xs shadow">
         <div>scroll: ({Math.round(offset.x)}, {Math.round(offset.y)})</div>
@@ -957,9 +1162,10 @@ export default function CanvasViewport({ userId }: Props) {
         <div>cursorΔ: ({Math.round(cursor.dx)}, {Math.round(cursor.dy)})</div>
         <div>sum: ({Math.round(offset.x + cursor.dx)}, {Math.round(offset.y + cursor.dy)})</div>
         <div className="opacity-60">
-          Wheel pan • RMB pan • Ctrl/Cmd+Wheel zoom • LMB create/move • Dbl-click delete (sel=all) • Shift+Click select • Shift+Drag (bg) marquee • Cmd/Ctrl+C/X/V
+          Wheel pan • RMB pan • Ctrl/Cmd+Wheel zoom • LMB create/move • Dbl-click delete (sel=all) • Shift+Click select • Shift+Drag (bg) marquee • Cmd/Ctrl+C/X/V • RMB on rect → Properties
         </div>
       </div>
     </div>
   );
 }
+

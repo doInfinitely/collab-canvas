@@ -235,22 +235,73 @@ export default function CanvasViewport({ userId }: Props) {
   }, []);
 
   const cursorForPerimeter = (s: Shape, wx: number, wy: number, modForRotate: boolean) => {
-    if (modForRotate) return "grab" as const; // rotation hint everywhere on perimeter
+    if (modForRotate) return "grab" as const;
 
     const sides = resolveSides(s.sides);
+    const threshWorld = 10 / scaleRef.current; // keep in sync with hover/pick
+    const corner = nearCorner(s, wx, wy, threshWorld);
+
+    if (corner && corner.type === "rect") {
+      // Map corner signs to CSS cursor
+      // (sx,sy) = (+,+) or (-,-) ⇒ nwse; (+,-) or (-,+) ⇒ nesw
+      const diag = (corner.sx === corner.sy) ? "nwse-resize" : "nesw-resize";
+      return diag as "nwse-resize" | "nesw-resize";
+    }
+
     if (sides === 4) {
-      // Pick edge axis for a rectangle using local coords
+      // Edge-only (fallback): pick axis
       const { lx, ly } = worldToLocal(s, wx, wy);
       const rx = Math.abs(s.width) / 2;
       const ry = Math.abs(s.height) / 2;
-      // distance to each edge (local, unsigned)
       const dx = Math.abs(Math.abs(lx) - rx);
       const dy = Math.abs(Math.abs(ly) - ry);
-      // Closer axis defines cursor
       return (dx < dy) ? ("ew-resize" as const) : ("ns-resize" as const);
     }
-    // For ellipse / polygons, crosshair is a good generic perimeter affordance
+
     return "crosshair" as const;
+  };
+
+  // Returns which corner we are near for rectangles, or near a polygon vertex.
+  // For rect: corners are (±rx, ±ry). For others: checks polygon vertices.
+  // Returns {sx, sy} for rect corners; for polygons returns {i}, we’ll treat as uniform scale.
+  const nearCorner = (s: Shape, wx: number, wy: number, threshWorld: number):
+    | { type: "rect", sx: 1 | -1, sy: 1 | -1 }
+    | { type: "poly", i: number }
+    | null => {
+    const sides = resolveSides(s.sides);
+    const { lx, ly } = worldToLocal(s, wx, wy);
+    const rx = Math.abs(s.width) / 2;
+    const ry = Math.abs(s.height) / 2;
+
+    // Rect corners
+    if (sides === 4) {
+      const candidates: Array<{ sx: 1|-1, sy: 1|-1, cx: number, cy: number }> = [
+        { sx:  1, sy:  1, cx:  rx, cy:  ry },
+        { sx:  1, sy: -1, cx:  rx, cy: -ry },
+        { sx: -1, sy:  1, cx: -rx, cy:  ry },
+        { sx: -1, sy: -1, cx: -rx, cy: -ry },
+      ];
+      for (const c of candidates) {
+        const d = Math.hypot(lx - c.cx, ly - c.cy);
+        if (d <= threshWorld) return { type: "rect", sx: c.sx, sy: c.sy };
+      }
+      return null;
+    }
+
+    // Polygon vertices (including ellipse treated as n≈16 reference points)
+    const n = sides === 0 ? 16 : sides;
+    const start = -Math.PI / 2;
+    const verts: Array<[number, number]> = [];
+    for (let i = 0; i < n; i++) {
+      const a = start + (i * 2 * Math.PI) / n;
+      verts.push([rx * Math.cos(a), ry * Math.sin(a)]);
+    }
+    for (let i = 0; i < n; i++) {
+      const [vx, vy] = verts[i];
+      const d = Math.hypot(lx - vx, ly - vy);
+      if (d <= threshWorld) return { type: "poly", i };
+    }
+    return null;
   };
 
   // ===== Supabase presence channel (for tuples & remote cursors) =====
@@ -268,7 +319,7 @@ export default function CanvasViewport({ userId }: Props) {
   }, []);
 
   // SVG cursor (inherits into shapes)
-  const [svgCursor, setSvgCursor] = useState<"default" | "crosshair" | "ew-resize" | "ns-resize" | "grab">("default");
+  const [svgCursor, setSvgCursor] = useState<"default" | "crosshair" | "ew-resize" | "ns-resize" | "nwse-resize" | "nesw-resize" | "grab">("default");
 
   // --- remote cursors state (latest world coords per user) ---
   type RemoteCursor = { worldX: number; worldY: number; at: number };
@@ -643,9 +694,9 @@ export default function CanvasViewport({ userId }: Props) {
         id: string;
         startWorld: { x: number; y: number };
         start: Shape;
-        // NEW:
-        lock: "x" | "y" | "uniform";
+        lock: "x" | "y" | "uniform" | "corner"; // NEW includes "corner"
         startHalf: { rx: number; ry: number };
+        cornerSign?: { sx: 1 | -1; sy: 1 | -1 }; // NEW for corner lock
       }
     | { kind: "rotating"; id: string; startAngle: number; initialRot: number };
 
@@ -669,17 +720,22 @@ export default function CanvasViewport({ userId }: Props) {
     const peri = pickPerimeter(e);
     if (peri) {
       const { wx, wy } = worldFromSvgEvent(e);
+      // Inside onLeftDown, peri branch with { wx, wy } ready
       if (e.metaKey || e.ctrlKey) {
+        // rotation unchanged
         const { cx, cy } = shapeCenter(peri);
         const ang0 = Math.atan2(wy - cy, wx - cx);
         setDrag({ kind: "rotating", id: peri.id, startAngle: ang0, initialRot: peri.rotation ?? 0 });
-        return
+        return;
       }
-      // --- RESIZE init ---
+
+      // Try corner first
+      const threshWorld = 10 / scaleRef.current;
+      const corner = nearCorner(peri, wx, wy, threshWorld);
+
       const sides = resolveSides(peri.sides);
       const theta = peri.rotation ?? 0;
       const { cx, cy } = shapeCenter(peri);
-
       // world → local
       const dxw = wx - cx, dyw = wy - cy;
       const c = Math.cos(-theta), si = Math.sin(-theta);
@@ -689,9 +745,22 @@ export default function CanvasViewport({ userId }: Props) {
       const rx0 = Math.abs(peri.width) / 2;
       const ry0 = Math.abs(peri.height) / 2;
 
-      // Choose lock:
-      // - Rect: axis closer to the edge (x vs y)
-      // - Others: uniform (keep aspect)
+      if (corner) {
+        // RECT: free XY with a fixed opposite corner; POLY/ELLIPSE: uniform (keeps shape)
+        const lock: "corner" | "uniform" = (corner.type === "rect") ? "corner" : "uniform";
+        setDrag({
+          kind: "resizing",
+          id: peri.id,
+          startWorld: { x: wx, y: wy },
+          start: { ...peri },
+          lock,
+          startHalf: { rx: rx0, ry: ry0 },
+          cornerSign: corner.type === "rect" ? { sx: corner.sx, sy: corner.sy } : undefined,
+        });
+        return;
+      }
+
+      // Edge fallback (your previous pick-axis / uniform rules)
       let lock: "x" | "y" | "uniform";
       if (sides === 4) {
         const dxEdge = Math.abs(Math.abs(lx) - rx0);
@@ -700,7 +769,6 @@ export default function CanvasViewport({ userId }: Props) {
       } else {
         lock = "uniform";
       }
-
       setDrag({
         kind: "resizing",
         id: peri.id,
@@ -709,7 +777,7 @@ export default function CanvasViewport({ userId }: Props) {
         lock,
         startHalf: { rx: rx0, ry: ry0 },
       });
-      return; // IMPORTANT: don't fall through to create
+      return;
     }
 
     // 2) Inside shape? move/selection
@@ -816,58 +884,63 @@ export default function CanvasViewport({ userId }: Props) {
     }
 
     // resizing (axis-locked / uniform)
-    if (drag.kind === "resizing") {
-      const s0 = drag.start;
-      const { cx, cy } = shapeCenter(s0);
-      const theta = s0.rotation ?? 0;
+  if (drag.kind === "resizing") {
+    const { wx, wy } = worldFromSvgEvent(e as any);
+    const s0 = drag.start;
+    const { cx, cy } = shapeCenter(s0);
+    const theta = s0.rotation ?? 0;
 
-      // world → local at current cursor
-      const dxw = wx - cx, dyw = wy - cy;
-      const c = Math.cos(-theta), si = Math.sin(-theta);
-      const lx = dxw * c - dyw * si;
-      const ly = dxw * si + dyw * c;
+    // world → local at current cursor
+    const dxw = wx - cx, dyw = wy - cy;
+    const c = Math.cos(-theta), si = Math.sin(-theta);
+    const lx = dxw * c - dyw * si;
+    const ly = dxw * si + dyw * c;
 
-      const minHalf = 1.5;
-      let rx = drag.startHalf.rx;
-      let ry = drag.startHalf.ry;
+    const minHalf = 1.5;
+    let rx = drag.startHalf.rx;
+    let ry = drag.startHalf.ry;
 
-      if (drag.lock === "x") {
-        rx = Math.max(minHalf, Math.abs(lx));
-      } else if (drag.lock === "y") {
-        ry = Math.max(minHalf, Math.abs(ly));
-      } else {
-        const kx = Math.abs(lx) / (drag.startHalf.rx || 1);
-        const ky = Math.abs(ly) / (drag.startHalf.ry || 1);
-        const k = Math.max(kx, ky, minHalf / Math.max(drag.startHalf.rx, drag.startHalf.ry));
-        rx = Math.max(minHalf, drag.startHalf.rx * k);
-        ry = Math.max(minHalf, drag.startHalf.ry * k);
-      }
-
-      const newW = Math.round(rx * 2);
-      const newH = Math.round(ry * 2);
-      const nx = Math.round(cx - newW / 2);
-      const ny = Math.round(cy - newH / 2);
-
-      setShapes(prev => {
-        const m = new Map(prev);
-        const cur = m.get(drag.id); if (!cur) return prev;
-        m.set(drag.id, { ...cur, x: nx, y: ny, width: newW, height: newH, updated_at: nowIso() });
-        return m;
-      });
-
-      shapesChRef.current?.send({
-        type: "broadcast",
-        event: "shape-resize",
-        payload: { id: drag.id, x: nx, y: ny, width: newW, height: newH, updated_at: nowIso() },
-      });
-
-      scheduleMoveUpdate(async () => {
-        await supabase.from("shapes")
-          .update({ x: nx, y: ny, width: newW, height: newH, updated_at: nowIso() })
-          .eq("id", drag.id);
-      });
-      return;
+    if (drag.lock === "x") {
+      rx = Math.max(minHalf, Math.abs(lx));
+    } else if (drag.lock === "y") {
+      ry = Math.max(minHalf, Math.abs(ly));
+    } else if (drag.lock === "uniform") {
+      const kx = Math.abs(lx) / (drag.startHalf.rx || 1);
+      const ky = Math.abs(ly) / (drag.startHalf.ry || 1);
+      const k = Math.max(kx, ky, minHalf / Math.max(drag.startHalf.rx, drag.startHalf.ry));
+      rx = Math.max(minHalf, drag.startHalf.rx * k);
+      ry = Math.max(minHalf, drag.startHalf.ry * k);
+    } else {
+      // CORNER: free XY, both axes track cursor with minimums (rect only)
+      rx = Math.max(minHalf, Math.abs(lx));
+      ry = Math.max(minHalf, Math.abs(ly));
     }
+
+    const newW = Math.round(rx * 2);
+    const newH = Math.round(ry * 2);
+    const nx = Math.round(cx - newW / 2);
+    const ny = Math.round(cy - newH / 2);
+
+    setShapes(prev => {
+      const m = new Map(prev);
+      const cur = m.get(drag.id); if (!cur) return prev;
+      m.set(drag.id, { ...cur, x: nx, y: ny, width: newW, height: newH, updated_at: nowIso() });
+      return m;
+    });
+
+    shapesChRef.current?.send({
+      type: "broadcast",
+      event: "shape-resize",
+      payload: { id: drag.id, x: nx, y: ny, width: newW, height: newH, updated_at: nowIso() },
+    });
+
+    scheduleMoveUpdate(async () => {
+      await supabase.from("shapes")
+        .update({ x: nx, y: ny, width: newW, height: newH, updated_at: nowIso() })
+        .eq("id", drag.id);
+    });
+    return;
+  }
 
     // rotating
     if (drag.kind === "rotating") {

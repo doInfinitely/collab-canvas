@@ -1200,40 +1200,58 @@ export default function CanvasViewport({ userId }: Props) {
   const addAnnotation = useCallback(async () => {
     const text = annotationInput.trim();
     if (!text || !modalShapeId) return;
+
+    // Target shapes: all selected (if modal shape is selected), else just the modal shape
+    const targetIds = (selectedIdsRef.current.size > 0 && selectedIdsRef.current.has(modalShapeId))
+      ? Array.from(selectedIdsRef.current)
+      : [modalShapeId];
+
     const now = nowIso();
-    const ann: Annotation = {
-      id: (typeof crypto !== "undefined" && "randomUUID" in crypto) ? crypto.randomUUID() : `ann_${Math.random().toString(36).slice(2)}`,
-      shape_id: modalShapeId, user_id: userId, text, created_at: now,
-    };
-    setAnnotationsByShape(prev => { const m = new Map(prev); const curr = m.get(modalShapeId) ?? []; m.set(modalShapeId, [...curr, ann]); return m; });
+    const anns = targetIds.map((shapeId) => ({
+      id: (typeof crypto !== "undefined" && "randomUUID" in crypto)
+        ? crypto.randomUUID()
+        : `ann_${Math.random().toString(36).slice(2)}`,
+      shape_id: shapeId,
+      user_id: userId,
+      text,
+      created_at: now,
+    })) as Annotation[];
+
+    // Optimistic add to each target’s list
+    setAnnotationsByShape(prev => {
+      const m = new Map(prev);
+      for (const ann of anns) {
+        const arr = m.get(ann.shape_id) ?? [];
+        m.set(ann.shape_id, [...arr, ann]);
+      }
+      return m;
+    });
+
     setAnnotationInput("");
-    annotationsChRef.current?.send({ type: "broadcast", event: "annotation-upsert", payload: ann });
-    const { error } = await supabase.from("shape_annotations").insert(ann as any);
-    if (error) console.warn("Annotation insert failed:", error.message);
-  }, [annotationInput, modalShapeId, userId]);
 
-  const deleteAnnotation = useCallback(async (annotationId: string, shapeId: string) => {
-    const prev = annotationsByShape.get(shapeId) ?? [];
-    const toRestore = prev.find(a => a.id === annotationId);
-    if (!toRestore) return;
-    if (toRestore.user_id !== userId) return;
+    // Broadcast each (so peers update immediately)
+    for (const ann of anns) {
+      annotationsChRef.current?.send({
+        type: "broadcast",
+        event: "annotation-upsert",
+        payload: ann,
+      });
+    }
 
-    setAnnotationsByShape(prevMap => { const m = new Map(prevMap); m.set(shapeId, (m.get(shapeId) ?? []).filter(a => a.id !== annotationId)); return m; });
-    annotationsChRef.current?.send({ type: "broadcast", event: "annotation-delete", payload: { id: annotationId, shape_id: shapeId } });
-
-    const { error } = await supabase.from("shape_annotations").delete().eq("id", annotationId).eq("user_id", userId);
+    // Persist (batch insert). If it fails, roll back the optimistic adds.
+    const { error } = await supabase.from("shape_annotations").insert(anns as any);
     if (error) {
-      console.warn("Annotation delete failed:", error.message);
-      setAnnotationsByShape(prevMap => {
-        const m = new Map(prevMap);
-        const arr = m.get(shapeId) ?? [];
-        if (!arr.some(a => a.id === toRestore.id)) {
-          m.set(shapeId, [...arr, toRestore].sort((a,b)=> new Date(a.created_at).getTime() - new Date(b.created_at).getTime()));
+      console.warn("Annotation insert failed:", error.message);
+      setAnnotationsByShape(prev => {
+        const m = new Map(prev);
+        for (const ann of anns) {
+          const arr = (m.get(ann.shape_id) ?? []).filter(a => a.id !== ann.id);
+          m.set(ann.shape_id, arr);
         }
         return m;
       });
     }
-  }, [annotationsByShape, userId]);
+  }, [annotationInput, modalShapeId, userId]);
 
   const saveSides = useCallback(async () => {
     if (!modalShapeId) return;
@@ -1548,7 +1566,14 @@ export default function CanvasViewport({ userId }: Props) {
                 </div>
 
                 <div className="mt-3">
-                  <label className="mb-1 block text-xs text-gray-600">Add annotation (as {email})</label>
+                  <label className="mb-1 block text-xs text-gray-600">
+                    Add annotation (as {email})
+                  </label>
+                  {selectedIds.size > 0 && selectedIds.has(modalShapeId!) && (
+                    <div className="mb-1 text-xs text-gray-500">
+                      This note will be added to {selectedIds.size} selected shape{selectedIds.size > 1 ? "s" : ""}.
+                    </div>
+                  )}
                   <textarea
                     className="h-20 w-full rounded-md border border-gray-300 p-2 text-sm outline-none focus:border-blue-500"
                     placeholder="Type a note…"

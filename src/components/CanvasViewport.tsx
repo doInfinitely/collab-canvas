@@ -64,6 +64,9 @@ export default function CanvasViewport({ userId }: Props) {
     startX: number; startY: number; curX: number; curY: number;
   }>(null);
 
+  // Internal clipboard of shapes (deep copies)
+  const clipboardRef = useRef<Shape[] | null>(null);
+
   // helpers
   const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
   const toWorld = (client: { x: number; y: number }) => ({
@@ -71,13 +74,21 @@ export default function CanvasViewport({ userId }: Props) {
     y: offsetRef.current.y + client.y / scaleRef.current,
   });
 
+  const worldCursor = () => ({
+    x: offsetRef.current.x + screenCursorRef.current.x / scaleRef.current,
+    y: offsetRef.current.y + screenCursorRef.current.y / scaleRef.current,
+  });
+
   // refs mirror latest values to avoid stale closures in rAF/broadcasts
   const offsetRef = useRef(offset);
   const cursorRef = useRef(cursor);
   const screenCursorRef = useRef(screenCursor);
+  const selectedIdsRef = useRef(selectedIds);
+  const shapesRef = useRef<Map<string, Shape>>(new Map());
   useEffect(() => { offsetRef.current = offset; }, [offset]);
   useEffect(() => { cursorRef.current = cursor; }, [cursor]);
   useEffect(() => { screenCursorRef.current = screenCursor; }, [screenCursor]);
+  useEffect(() => { selectedIdsRef.current = selectedIds; }, [selectedIds]);
 
   // ===== Supabase presence channel (for tuples & remote cursors) =====
   const tabIdRef = useRef(getTabId());
@@ -339,6 +350,7 @@ export default function CanvasViewport({ userId }: Props) {
   // ===== Shapes (shared via Supabase) =====
   const [shapes, setShapes] = useState<Map<string, Shape>>(new Map());
   const shapeList = useMemo(() => Array.from(shapes.values()), [shapes]);
+  useEffect(() => { shapesRef.current = shapes; }, [shapes]);
 
   const upsertShapeLocal = useCallback((s: Shape) => {
     setShapes(prev => {
@@ -594,7 +606,7 @@ export default function CanvasViewport({ userId }: Props) {
       return;
     }
 
-    // Finish multi-drag: nothing extra to do (we already broadcast + scheduled persists during move)
+    // Finish multi-drag
     if (multiDragRef.current) {
       multiDragRef.current = null;
       return;
@@ -639,21 +651,19 @@ export default function CanvasViewport({ userId }: Props) {
     }
   }, [drag, marquee, shapes, userId, upsertShapeLocal, removeShapeLocal]);
 
-  // ===== Double-click delete =====
+  // ===== Double-click delete (delete all if any selected) =====
   const onDoubleClickSVG = useCallback(async (e: React.MouseEvent<SVGSVGElement>) => {
     if (drag.kind !== "none") return;
 
     const hit = pickShape(e.clientX, e.clientY);
     if (!hit) return;
 
-    // If the hit shape is selected, delete the whole selection; otherwise delete just the hit.
     const idsToDelete = selectedIds.has(hit.id)
       ? Array.from(selectedIds)
       : [hit.id];
 
-    // Capture shapes for potential rollback on DB error
-    const shapesToRestore = idsToDelete
-      .map((id) => shapes.get(id))
+    const toRestore = idsToDelete
+      .map((id) => shapesRef.current.get(id))
       .filter(Boolean) as Shape[];
 
     // Optimistic local remove + broadcast per id
@@ -666,24 +676,162 @@ export default function CanvasViewport({ userId }: Props) {
       shapesChRef.current?.send({ type: "broadcast", event: "shape-delete", payload: { id } });
     }
 
-    // Try a batch delete
     const { error } = await supabase.from("shapes").delete().in("id", idsToDelete);
-
     if (error) {
-      // Roll back local if DB delete fails
       console.warn("Batch delete failed:", error.message);
       setShapes(prev => {
         const m = new Map(prev);
-        for (const s of shapesToRestore) m.set(s.id, s);
+        for (const s of toRestore) m.set(s.id, s);
         return m;
       });
     } else {
-      // If we deleted the selection, clear it
-      if (idsToDelete.length > 1 || selectedIds.has(hit.id)) {
-        setSelectedIds(new Set());
-      }
+      setSelectedIds(new Set());
     }
-  }, [drag, pickShape, selectedIds, shapes]);
+  }, [drag, pickShape, selectedIds]);
+
+  // ====== COPY / CUT / PASTE ======
+  // Helper: compute bounding box & center for a list of shapes
+  const bboxOf = (items: Shape[]) => {
+    if (items.length === 0) return null;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const s of items) {
+      const x1 = Math.min(s.x, s.x + s.width);
+      const y1 = Math.min(s.y, s.y + s.height);
+      const x2 = Math.max(s.x, s.x + s.width);
+      const y2 = Math.max(s.y, s.y + s.height);
+      if (x1 < minX) minX = x1;
+      if (y1 < minY) minY = y1;
+      if (x2 > maxX) maxX = x2;
+      if (y2 > maxY) maxY = y2;
+    }
+    return { minX, minY, maxX, maxY, cx: (minX + maxX) / 2, cy: (minY + maxY) / 2 };
+  };
+
+  const doCopy = useCallback(() => {
+    const ids = Array.from(selectedIdsRef.current);
+    if (ids.length === 0) return;
+    const shapesToCopy = ids
+      .map((id) => shapesRef.current.get(id))
+      .filter(Boolean) as Shape[];
+    // Store deep copies (positions preserved)
+    clipboardRef.current = shapesToCopy.map(s => ({ ...s }));
+  }, []);
+
+  const doCut = useCallback(async () => {
+    const ids = Array.from(selectedIdsRef.current);
+    if (ids.length === 0) return;
+
+    const shapesToCut = ids
+      .map((id) => shapesRef.current.get(id))
+      .filter(Boolean) as Shape[];
+
+    // Put copies into clipboard
+    clipboardRef.current = shapesToCut.map(s => ({ ...s }));
+
+    // Optimistic remove local + broadcast
+    setShapes(prev => {
+      const m = new Map(prev);
+      for (const id of ids) m.delete(id);
+      return m;
+    });
+    for (const id of ids) {
+      shapesChRef.current?.send({ type: "broadcast", event: "shape-delete", payload: { id } });
+    }
+
+    // Persist delete
+    const { error } = await supabase.from("shapes").delete().in("id", ids);
+    if (error) {
+      // Roll back on failure
+      console.warn("Cut delete failed:", error.message);
+      setShapes(prev => {
+        const m = new Map(prev);
+        for (const s of shapesToCut) m.set(s.id, s);
+        return m;
+      });
+    }
+    // Clear selection after cut
+    setSelectedIds(new Set());
+  }, []);
+
+  const doPaste = useCallback(async () => {
+    const clip = clipboardRef.current;
+    if (!clip || clip.length === 0) return;
+
+    const target = worldCursor(); // where the user’s cursor is right now (world coords)
+    const bb = bboxOf(clip);
+    if (!bb) return;
+
+    const dx = target.x - bb.cx;
+    const dy = target.y - bb.cy;
+
+    // Create new shapes with new IDs, shifted so group center = cursor
+    const now = new Date().toISOString();
+    const newShapes: Shape[] = clip.map((s) => ({
+      ...s,
+      id: (typeof crypto !== "undefined" && "randomUUID" in crypto) ? crypto.randomUUID() : `shape_${Math.random().toString(36).slice(2)}`,
+      created_by: userId,
+      x: Math.round(s.x + dx),
+      y: Math.round(s.y + dy),
+      updated_at: now,
+    }));
+
+    // Optimistic local + broadcast
+    setShapes(prev => {
+      const m = new Map(prev);
+      for (const s of newShapes) m.set(s.id, s);
+      return m;
+    });
+    for (const s of newShapes) {
+      shapesChRef.current?.send({ type: "broadcast", event: "shape-create", payload: s });
+    }
+
+    // Persist (batch insert)
+    const { error } = await supabase.from("shapes").insert(newShapes);
+    if (error) {
+      console.warn("Paste insert failed:", error.message);
+      // Roll back newly added if DB failed
+      setShapes(prev => {
+        const m = new Map(prev);
+        for (const s of newShapes) m.delete(s.id);
+        return m;
+      });
+      return;
+    }
+
+    // Select the newly pasted shapes
+    setSelectedIds(new Set(newShapes.map((s) => s.id)));
+  }, [userId]);
+
+  // Global key handler for Cmd/Ctrl + X/C/V
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      // Ignore if typing in inputs/contenteditable
+      const target = e.target as HTMLElement | null;
+      if (target && (
+        target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        (target as HTMLElement).isContentEditable
+      )) return;
+
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod) return;
+
+      const k = e.key.toLowerCase();
+      if (k === "c") {
+        e.preventDefault();
+        doCopy();
+      } else if (k === "x") {
+        e.preventDefault();
+        void doCut();
+      } else if (k === "v") {
+        e.preventDefault();
+        void doPaste();
+      }
+    };
+
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [doCopy, doCut, doPaste]);
 
   // ===== Render =====
   return (
@@ -809,10 +957,9 @@ export default function CanvasViewport({ userId }: Props) {
         <div>cursorΔ: ({Math.round(cursor.dx)}, {Math.round(cursor.dy)})</div>
         <div>sum: ({Math.round(offset.x + cursor.dx)}, {Math.round(offset.y + cursor.dy)})</div>
         <div className="opacity-60">
-          Wheel pan • RMB drag pan • Ctrl/Cmd+Wheel zoom • LMB create/move • Dbl-click delete • Shift+Click select • Shift+Drag (bg) marquee
+          Wheel pan • RMB pan • Ctrl/Cmd+Wheel zoom • LMB create/move • Dbl-click delete (sel=all) • Shift+Click select • Shift+Drag (bg) marquee • Cmd/Ctrl+C/X/V
         </div>
       </div>
     </div>
   );
 }
-

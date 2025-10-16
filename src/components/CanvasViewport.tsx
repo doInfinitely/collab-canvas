@@ -1,7 +1,7 @@
 // src/components/CanvasViewport.tsx
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase/client";
 
 type Props = { userId: string };
@@ -46,15 +46,29 @@ export default function CanvasViewport({ userId }: Props) {
   const scaleRef = useRef(scale);
   useEffect(() => { scaleRef.current = scale; }, [scale]);
 
+  // --- Selection state ---
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const clearSelection = () => setSelectedIds(new Set());
+  const addToSelection = (id: string) =>
+    setSelectedIds((prev) => (prev.has(id) ? prev : new Set([...prev, id])));
+
+  // Multi-drag of selected shapes
+  const multiDragRef = useRef<null | {
+    startMouseX: number;
+    startMouseY: number;
+    starts: Array<{ id: string; x: number; y: number }>;
+  }>(null);
+
+  // Marquee (shift-drag box) in WORLD coordinates
+  const [marquee, setMarquee] = useState<null | {
+    startX: number; startY: number; curX: number; curY: number;
+  }>(null);
+
   // helpers
   const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
   const toWorld = (client: { x: number; y: number }) => ({
     x: offsetRef.current.x + client.x / scaleRef.current,
     y: offsetRef.current.y + client.y / scaleRef.current,
-  });
-  const toScreen = (world: { x: number; y: number }) => ({
-    x: (world.x - offsetRef.current.x) * scaleRef.current,
-    y: (world.y - offsetRef.current.y) * scaleRef.current,
   });
 
   // refs mirror latest values to avoid stale closures in rAF/broadcasts
@@ -101,8 +115,6 @@ export default function CanvasViewport({ userId }: Props) {
   // broadcast presence telemetry (coalesced with rAF)
   const publish = useCallback(() => {
     if (!presenceChRef.current) return;
-    const { x, y } = offsetRef.current;
-    const { dx, dy } = cursorRef.current;
     const { x: cx, y: cy } = screenCursorRef.current;
     const worldUnderCursorX = offsetRef.current.x + cx / scaleRef.current;
     const worldUnderCursorY = offsetRef.current.y + cy / scaleRef.current;
@@ -326,6 +338,7 @@ export default function CanvasViewport({ userId }: Props) {
 
   // ===== Shapes (shared via Supabase) =====
   const [shapes, setShapes] = useState<Map<string, Shape>>(new Map());
+  const shapeList = useMemo(() => Array.from(shapes.values()), [shapes]);
 
   const upsertShapeLocal = useCallback((s: Shape) => {
     setShapes(prev => {
@@ -424,35 +437,104 @@ export default function CanvasViewport({ userId }: Props) {
     });
   };
 
-  // ===== Left-drag on SVG: create or move rectangles =====
+  // ===== Left-drag on SVG: selection + create/move rectangles =====
   const onLeftDown = useCallback((e: React.MouseEvent<SVGSVGElement>) => {
     if (e.button !== 0) return; // left only
     const picked = pickShape(e.clientX, e.clientY);
     const world = toWorld({ x: e.clientX, y: e.clientY });
 
-    if (picked) {
-      const grabOffset = { dx: world.x - picked.x, dy: world.y - picked.y };
-      setDrag({ kind: "moving", id: picked.id, grabOffset });
-    } else {
-      const ghost: Shape = {
-        id: "ghost",
-        created_by: userId,
-        x: world.x,
-        y: world.y,
-        width: 0,
-        height: 0,
-        stroke: "#000000",
-        stroke_width: 2,
-        fill: "#ffffff", // white body to occlude grid
-      };
-      setDrag({ kind: "creating", start: world, ghost });
+    // Background
+    if (!picked) {
+      if (e.shiftKey) {
+        // Start marquee selection on background
+        setMarquee({ startX: world.x, startY: world.y, curX: world.x, curY: world.y });
+        return;
+      } else {
+        // Click background clears selection, then proceed with your existing creation gesture
+        clearSelection();
+        const ghost: Shape = {
+          id: "ghost",
+          created_by: userId,
+          x: world.x,
+          y: world.y,
+          width: 0,
+          height: 0,
+          stroke: "#000000",
+          stroke_width: 2,
+          fill: "#ffffff",
+        };
+        setDrag({ kind: "creating", start: world, ghost });
+        return;
+      }
     }
-  }, [userId, shapes, pickShape]);
+
+    // Clicked on a shape
+    if (e.shiftKey) {
+      // Shift+click selects (adds), no drag
+      addToSelection(picked.id);
+      return;
+    }
+
+    // If the clicked shape is already selected, prepare to multi-drag all selected
+    if (selectedIds.has(picked.id)) {
+      multiDragRef.current = {
+        startMouseX: e.clientX,
+        startMouseY: e.clientY,
+        starts: [...selectedIds]
+          .map((sid) => shapes.get(sid))
+          .filter(Boolean)
+          .map((s) => ({ id: s!.id, x: s!.x, y: s!.y })),
+      };
+      return;
+    }
+
+    // Otherwise: start your existing single-shape move
+    const grabOffset = { dx: world.x - picked.x, dy: world.y - picked.y };
+    setDrag({ kind: "moving", id: picked.id, grabOffset });
+  }, [userId, shapes, pickShape, selectedIds]);
 
   const onLeftMove = useCallback((e: React.MouseEvent<SVGSVGElement>) => {
-    if (drag.kind === "none") return;
     const world = toWorld({ x: e.clientX, y: e.clientY });
 
+    // Update marquee
+    if (marquee) {
+      setMarquee(m => (m ? { ...m, curX: world.x, curY: world.y } : m));
+      return;
+    }
+
+    // Multi-drag: move all selected by the same delta
+    if (multiDragRef.current) {
+      const dx = (e.clientX - multiDragRef.current.startMouseX) / scaleRef.current;
+      const dy = (e.clientY - multiDragRef.current.startMouseY) / scaleRef.current;
+
+      // Optimistic local update for all selected
+      setShapes(prev => {
+        const m = new Map(prev);
+        for (const { id, x, y } of multiDragRef.current!.starts) {
+          const s = m.get(id);
+          if (!s) continue;
+          m.set(id, { ...s, x: Math.round(x + dx), y: Math.round(y + dy), updated_at: new Date().toISOString() });
+        }
+        return m;
+      });
+
+      // Broadcast + schedule persist for all selected
+      for (const { id, x, y } of multiDragRef.current.starts) {
+        const nx = Math.round(x + dx);
+        const ny = Math.round(y + dy);
+        shapesChRef.current?.send({
+          type: "broadcast",
+          event: "shape-move",
+          payload: { id, x: nx, y: ny, updated_at: new Date().toISOString() },
+        });
+        scheduleMoveUpdate(async () => {
+          await supabase.from("shapes").update({ x: nx, y: ny, updated_at: new Date().toISOString() }).eq("id", id);
+        });
+      }
+      return;
+    }
+
+    // Your existing single-shape create/move
     if (drag.kind === "creating") {
       setDrag({
         kind: "creating",
@@ -492,9 +574,33 @@ export default function CanvasViewport({ userId }: Props) {
           .eq("id", drag.id);
       });
     }
-  }, [drag]);
+  }, [drag, marquee]);
 
   const onLeftUp = useCallback(async () => {
+    // Finalize marquee → select all fully inside
+    if (marquee) {
+      const { startX, startY, curX, curY } = marquee;
+      const minX = Math.min(startX, curX), maxX = Math.max(startX, curX);
+      const minY = Math.min(startY, curY), maxY = Math.max(startY, curY);
+      const inside = [...shapes.values()]
+        .filter(s =>
+          s.x >= minX && s.y >= minY &&
+          s.x + s.width  <= maxX &&
+          s.y + s.height <= maxY
+        )
+        .map(s => s.id);
+      setSelectedIds(new Set(inside));
+      setMarquee(null);
+      return;
+    }
+
+    // Finish multi-drag: nothing extra to do (we already broadcast + scheduled persists during move)
+    if (multiDragRef.current) {
+      multiDragRef.current = null;
+      return;
+    }
+
+    // Your existing single-shape finalize
     if (drag.kind === "creating") {
       const g = drag.ghost;
       const w = Math.round(g.width);
@@ -531,7 +637,7 @@ export default function CanvasViewport({ userId }: Props) {
     } else if (drag.kind === "moving") {
       setDrag({ kind: "none" });
     }
-  }, [drag, userId, upsertShapeLocal, removeShapeLocal]);
+  }, [drag, marquee, shapes, userId, upsertShapeLocal, removeShapeLocal]);
 
   // ===== Double-click delete =====
   const onDoubleClickSVG = useCallback(async (e: React.MouseEvent<SVGSVGElement>) => {
@@ -574,8 +680,15 @@ export default function CanvasViewport({ userId }: Props) {
         onMouseUp={onLeftUp}
         onDoubleClick={onDoubleClickSVG}
       >
+        <defs>
+          {/* subtle glow for selected shapes */}
+          <filter id="selGlow" x="-50%" y="-50%" width="200%" height="200%">
+            <feDropShadow dx="0" dy="0" stdDeviation="3" floodColor="#3b82f6" floodOpacity="0.9" />
+          </filter>
+        </defs>
+
         <g transform={`translate(${-offset.x * scale}, ${-offset.y * scale}) scale(${scale})`}>
-          {Array.from(shapes.values()).map(s => (
+          {shapeList.map((s) => (
             <rect
               key={s.id}
               x={Math.min(s.x, s.x + s.width)}
@@ -587,6 +700,7 @@ export default function CanvasViewport({ userId }: Props) {
               strokeWidth={s.stroke_width / scale /* keeps stroke visually constant */}
               pointerEvents="all"
               style={{ cursor: "move" }}
+              filter={selectedIds.has(s.id) ? "url(#selGlow)" : undefined}
             />
           ))}
 
@@ -604,6 +718,28 @@ export default function CanvasViewport({ userId }: Props) {
             />
           )}
         </g>
+
+        {/* Marquee overlay (drawn in SCREEN coords for simplicity) */}
+        {marquee && (() => {
+          const minX = Math.min(marquee.startX, marquee.curX);
+          const minY = Math.min(marquee.startY, marquee.curY);
+          const maxX = Math.max(marquee.startX, marquee.curX);
+          const maxY = Math.max(marquee.startY, marquee.curY);
+          const sx = (minX - offset.x) * scaleRef.current;
+          const sy = (minY - offset.y) * scaleRef.current;
+          const sw = (maxX - minX) * scaleRef.current;
+          const sh = (maxY - minY) * scaleRef.current;
+          return (
+            <rect
+              x={sx} y={sy} width={sw} height={sh}
+              fill="rgba(59,130,246,0.1)"
+              stroke="#3b82f6"
+              strokeDasharray="6 4"
+              strokeWidth={1}
+              pointerEvents="none"
+            />
+          );
+        })()}
       </svg>
 
       {/* === Multiplayer cursors (screen-space overlay) === */}
@@ -642,8 +778,11 @@ export default function CanvasViewport({ userId }: Props) {
         <div>zoom: {scale.toFixed(2)}×</div>
         <div>cursorΔ: ({Math.round(cursor.dx)}, {Math.round(cursor.dy)})</div>
         <div>sum: ({Math.round(offset.x + cursor.dx)}, {Math.round(offset.y + cursor.dy)})</div>
-        <div className="opacity-60">Wheel pan • RMB drag pan • Ctrl/Cmd+Wheel zoom • LMB create/move • Dbl-click delete</div>
+        <div className="opacity-60">
+          Wheel pan • RMB drag pan • Ctrl/Cmd+Wheel zoom • LMB create/move • Dbl-click delete • Shift+Click select • Shift+Drag (bg) marquee
+        </div>
       </div>
     </div>
   );
 }
+

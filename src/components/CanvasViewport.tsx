@@ -642,18 +642,48 @@ export default function CanvasViewport({ userId }: Props) {
   // ===== Double-click delete =====
   const onDoubleClickSVG = useCallback(async (e: React.MouseEvent<SVGSVGElement>) => {
     if (drag.kind !== "none") return;
+
     const hit = pickShape(e.clientX, e.clientY);
     if (!hit) return;
 
-    removeShapeLocal(hit.id);
-    shapesChRef.current?.send({ type: "broadcast", event: "shape-delete", payload: { id: hit.id } });
+    // If the hit shape is selected, delete the whole selection; otherwise delete just the hit.
+    const idsToDelete = selectedIds.has(hit.id)
+      ? Array.from(selectedIds)
+      : [hit.id];
 
-    const { error } = await supabase.from("shapes").delete().eq("id", hit.id);
-    if (error) {
-      upsertShapeLocal(hit);
-      console.warn("Delete failed:", error.message);
+    // Capture shapes for potential rollback on DB error
+    const shapesToRestore = idsToDelete
+      .map((id) => shapes.get(id))
+      .filter(Boolean) as Shape[];
+
+    // Optimistic local remove + broadcast per id
+    setShapes(prev => {
+      const m = new Map(prev);
+      for (const id of idsToDelete) m.delete(id);
+      return m;
+    });
+    for (const id of idsToDelete) {
+      shapesChRef.current?.send({ type: "broadcast", event: "shape-delete", payload: { id } });
     }
-  }, [drag, pickShape, removeShapeLocal, upsertShapeLocal]);
+
+    // Try a batch delete
+    const { error } = await supabase.from("shapes").delete().in("id", idsToDelete);
+
+    if (error) {
+      // Roll back local if DB delete fails
+      console.warn("Batch delete failed:", error.message);
+      setShapes(prev => {
+        const m = new Map(prev);
+        for (const s of shapesToRestore) m.set(s.id, s);
+        return m;
+      });
+    } else {
+      // If we deleted the selection, clear it
+      if (idsToDelete.length > 1 || selectedIds.has(hit.id)) {
+        setSelectedIds(new Set());
+      }
+    }
+  }, [drag, pickShape, selectedIds, shapes]);
 
   // ===== Render =====
   return (

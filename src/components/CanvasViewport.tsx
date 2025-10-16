@@ -42,6 +42,21 @@ export default function CanvasViewport({ userId }: Props) {
   const [cursor, setCursor] = useState({ dx: 0, dy: 0 });
   const [screenCursor, setScreenCursor] = useState({ x: 0, y: 0 });
 
+  const [scale, setScale] = useState(1); // world→screen scale
+  const scaleRef = useRef(scale);
+  useEffect(() => { scaleRef.current = scale; }, [scale]);
+
+  // helpers
+  const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
+  const toWorld = (client: { x: number; y: number }) => ({
+    x: offsetRef.current.x + client.x / scaleRef.current,
+    y: offsetRef.current.y + client.y / scaleRef.current,
+  });
+  const toScreen = (world: { x: number; y: number }) => ({
+    x: (world.x - offsetRef.current.x) * scaleRef.current,
+    y: (world.y - offsetRef.current.y) * scaleRef.current,
+  });
+
   // refs mirror latest values to avoid stale closures in rAF/broadcasts
   const offsetRef = useRef(offset);
   const cursorRef = useRef(cursor);
@@ -89,6 +104,8 @@ export default function CanvasViewport({ userId }: Props) {
     const { x, y } = offsetRef.current;
     const { dx, dy } = cursorRef.current;
     const { x: cx, y: cy } = screenCursorRef.current;
+    const worldUnderCursorX = offsetRef.current.x + cx / scaleRef.current;
+    const worldUnderCursorY = offsetRef.current.y + cy / scaleRef.current;
     presenceChRef.current.send({
       type: "broadcast",
       event: "canvas-meta",
@@ -96,16 +113,14 @@ export default function CanvasViewport({ userId }: Props) {
         userId,
         tabId: tabIdRef.current,
         page: "canvas",
-        // camera & cursor deltas (for dashboard tuples)
-        scrollX: Math.round(x),
-        scrollY: Math.round(y),
-        cursorDX: Math.round(dx),
-        cursorDY: Math.round(dy),
-        sumX: Math.round(x + dx),
-        sumY: Math.round(y + dy),
-        // NEW: world-space cursor so others can render correctly
-        cursorWorldX: Math.round(x + cx),
-        cursorWorldY: Math.round(y + cy),
+        scrollX: Math.round(offsetRef.current.x),
+        scrollY: Math.round(offsetRef.current.y),
+        cursorDX: Math.round(cursorRef.current.dx),
+        cursorDY: Math.round(cursorRef.current.dy),
+        sumX: Math.round(offsetRef.current.x + cursorRef.current.dx),
+        sumY: Math.round(offsetRef.current.y + cursorRef.current.dy),
+        cursorWorldX: Math.round(worldUnderCursorX),
+        cursorWorldY: Math.round(worldUnderCursorY),
         at: new Date().toISOString(),
       },
     });
@@ -204,7 +219,7 @@ export default function CanvasViewport({ userId }: Props) {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    // Clear the bitmap in device pixels regardless of transform
+    // Clear
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -212,15 +227,21 @@ export default function CanvasViewport({ userId }: Props) {
 
     const w = canvas.clientWidth;
     const h = canvas.clientHeight;
+    const s = scaleRef.current;
 
-    const ox = ((-offsetRef.current.x % GRID_SIZE) + GRID_SIZE) % GRID_SIZE;
-    const oy = ((-offsetRef.current.y % GRID_SIZE) + GRID_SIZE) % GRID_SIZE;
+    // compute screen-space spacing/offset
+    const spacing = GRID_SIZE * s;
+    if (spacing < 4) return; // too dense—skip for perf/clarity
+
+    const ox = ((-offsetRef.current.x * s) % spacing + spacing) % spacing;
+    const oy = ((-offsetRef.current.y * s) % spacing + spacing) % spacing;
 
     ctx.fillStyle = DOT_COLOR;
-    for (let y = oy; y <= h; y += GRID_SIZE) {
-      for (let x = ox; x <= w; x += GRID_SIZE) {
+    const r = Math.max(1, DOT_RADIUS * s * 0.9); // scale dot radius a bit
+    for (let y = oy; y <= h; y += spacing) {
+      for (let x = ox; x <= w; x += spacing) {
         ctx.beginPath();
-        ctx.arc(x, y, DOT_RADIUS, 0, Math.PI * 2);
+        ctx.arc(x, y, r, 0, Math.PI * 2);
         ctx.fill();
       }
     }
@@ -252,28 +273,54 @@ export default function CanvasViewport({ userId }: Props) {
   // Redraw grid whenever offset changes
   useEffect(() => { drawGrid(); }, [drawGrid, offset.x, offset.y]);
 
-  // ===== Panning input on the root container (wheel + RMB drag) =====
+  // --- Panning (root) ---
   const panningRef = useRef(false);
   const lastRef = useRef({ x: 0, y: 0 });
 
-  const onWheel = (e: React.WheelEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    setOffset((o) => ({ x: o.x + e.deltaX, y: o.y + e.deltaY }));
-    schedulePublish();
-  };
   const onMouseDownRoot = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (e.button !== 2) return; // right button only
+    // Right mouse button starts panning; leave LMB behavior unchanged
+    if (e.button !== 2) return;
     panningRef.current = true;
     lastRef.current = { x: e.clientX, y: e.clientY };
   };
+
   const onMouseMoveRoot = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!panningRef.current) return;
-    const dx = e.clientX - lastRef.current.x;
-    const dy = e.clientY - lastRef.current.y;
+    // Keep pan speed consistent at any zoom
+    const dx = (e.clientX - lastRef.current.x) / scaleRef.current;
+    const dy = (e.clientY - lastRef.current.y) / scaleRef.current;
     lastRef.current = { x: e.clientX, y: e.clientY };
-    setOffset((o) => ({ x: o.x + dx, y: o.y + dy })); // natural panning
+    setOffset((o) => ({ x: o.x + dx, y: o.y + dy }));
     schedulePublish();
   };
+
+  const onWheel = (e: React.WheelEvent<HTMLDivElement>) => {
+    e.preventDefault();
+
+    if (e.ctrlKey || e.metaKey) {
+      // Pinch/zoom
+      const zoomIntensity = 0.0015;
+      const old = scaleRef.current;
+      const next = Math.min(4, Math.max(0.2, old * Math.exp(-e.deltaY * zoomIntensity)));
+
+      // Keep the point under the cursor fixed
+      const cx = e.clientX, cy = e.clientY;
+      const worldX = offsetRef.current.x + cx / old;
+      const worldY = offsetRef.current.y + cy / old;
+
+      setScale(next);
+      setOffset({ x: worldX - cx / next, y: worldY - cy / next });
+    } else {
+      // Normal wheel pans (scale-aware so speed feels the same)
+      setOffset((o) => ({
+        x: o.x + e.deltaX / scaleRef.current,
+        y: o.y + e.deltaY / scaleRef.current,
+      }));
+    }
+
+    schedulePublish();
+  };
+
   const onMouseUpRoot = () => { panningRef.current = false; };
   const onContextMenuRoot = (e: React.MouseEvent<HTMLDivElement>) => { e.preventDefault(); };
 
@@ -344,12 +391,6 @@ export default function CanvasViewport({ userId }: Props) {
     })();
     return () => { active = false; };
   }, []);
-
-  // ===== World <-> Screen helpers =====
-  const toWorld = (client: { x: number; y: number }) => ({
-    x: client.x + offsetRef.current.x,
-    y: client.y + offsetRef.current.y,
-  });
 
   const pickShape = useCallback((clientX: number, clientY: number): Shape | null => {
     const { x: wx, y: wy } = toWorld({ x: clientX, y: clientY });
@@ -533,7 +574,7 @@ export default function CanvasViewport({ userId }: Props) {
         onMouseUp={onLeftUp}
         onDoubleClick={onDoubleClickSVG}
       >
-        <g transform={`translate(${-offset.x}, ${-offset.y})`}>
+        <g transform={`translate(${-offset.x * scale}, ${-offset.y * scale}) scale(${scale})`}>
           {Array.from(shapes.values()).map(s => (
             <rect
               key={s.id}
@@ -543,7 +584,7 @@ export default function CanvasViewport({ userId }: Props) {
               height={Math.abs(s.height)}
               fill={s.fill ?? "#ffffff"}
               stroke={s.stroke}
-              strokeWidth={s.stroke_width}
+              strokeWidth={s.stroke_width / scale /* keeps stroke visually constant */}
               pointerEvents="all"
               style={{ cursor: "move" }}
             />
@@ -557,8 +598,8 @@ export default function CanvasViewport({ userId }: Props) {
               height={Math.abs(drag.ghost.height)}
               fill="transparent"
               stroke="#000000"
-              strokeWidth={2}
-              strokeDasharray="4 3"
+              strokeWidth={2 / scale}
+              strokeDasharray={`${4 / scale} ${3 / scale}`}
               pointerEvents="none"
             />
           )}
@@ -598,9 +639,10 @@ export default function CanvasViewport({ userId }: Props) {
       {/* Debug HUD (optional) */}
       <div className="absolute bottom-3 left-3 rounded bg-white/80 px-3 py-2 text-xs shadow">
         <div>scroll: ({Math.round(offset.x)}, {Math.round(offset.y)})</div>
+        <div>zoom: {scale.toFixed(2)}×</div>
         <div>cursorΔ: ({Math.round(cursor.dx)}, {Math.round(cursor.dy)})</div>
         <div>sum: ({Math.round(offset.x + cursor.dx)}, {Math.round(offset.y + cursor.dy)})</div>
-        <div className="opacity-60">Wheel pan • RMB drag pan • LMB create/move • Dbl-click delete</div>
+        <div className="opacity-60">Wheel pan • RMB drag pan • Ctrl/Cmd+Wheel zoom • LMB create/move • Dbl-click delete</div>
       </div>
     </div>
   );

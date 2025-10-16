@@ -1,223 +1,500 @@
-# CollabCanvas
+# CollabCanvas Rubric
 
-## Building Real-Time Collaborative Design Tools with AI
+## Total Points: 100
 
 ---
 
-## Background
+## Section 1: Core Collaborative Infrastructure (30 points)
 
-Figma revolutionized design by making collaboration seamless. Multiple designers could work together in real time, seeing each other’s cursors and making edits simultaneously without merge conflicts.
+### Real-Time Synchronization (12 points)
 
-This required solving complex technical challenges: real-time synchronization, conflict resolution, and 60 FPS performance while streaming data across the network.
+**Excellent (11-12 points)**
 
-Now imagine adding AI to this. What if you could tell an AI agent “create a login form” and watch it build the components on your canvas? Or say “arrange these elements in a grid” and see it happen automatically?
+* Sub-100ms object sync  
+* Sub-50ms cursor sync  
+* Zero visible lag during rapid multi-user edits
 
-This project challenges you to build both the collaborative infrastructure and an AI agent that can manipulate the canvas through natural language.
+**Good (9-10 points)**
 
-### Why This Matters
+* Consistent sync under 150ms  
+* Occasional minor delays with heavy load
 
-The future of design tools isn’t just collaborative — it’s co-creative. You’ll be building the foundation for how humans and AI can design together, in real time.
+**Satisfactory (6-8 points)**
 
-## Project Overview
+* Sync works but noticeable delays (200-300ms)  
+* Some lag during rapid edits
 
-This is a one-week sprint with three key deadlines:
+**Poor (0-5 points)**
 
-* MVP: Tuesday (24 hours)  
-* Early Submission: Friday (4 days)  
-* Final: Sunday (7 days)
+* Inconsistent sync  
+* Frequent delays over 300ms  
+* Broken under concurrent edits
 
-You’ll build in two phases: first the core collaborative canvas with real-time sync, then an AI agent that manipulates the canvas through natural language.
+### Conflict Resolution & State Management (9 points)
 
-### MVP Requirements (24 Hours)
+**Excellent (8-9 points)**
 
-This is a hard gate. To pass the MVP checkpoint, you must have:
+* Two users edit same object simultaneously → both see consistent final state  
+* Documented strategy (last-write-wins, CRDT, OT, etc.)  
+* No "ghost" objects or duplicates  
+* Rapid edits (10+ changes/sec) don't corrupt state  
+* Clear visual feedback on who last edited
 
-- [ ]  Basic canvas with pan/zoom  
-- [ ]  At least one shape type (rectangle, circle, or text)  
-- [ ]  Ability to create and move objects  
-- [ ]  Real-time sync between 2+ users  
-- [ ]  Multiplayer cursors with name labels  
-- [ ]  Presence awareness (who’s online)  
-- [ ]  User authentication (users have accounts/names)  
-- [ ]  Deployed and publicly accessible
+**Good (6-7 points)**
 
-The focus is on collaborative infrastructure.
+* Simultaneous edits resolve correctly 90%+ of time  
+* Strategy documented  
+* Minor visual artifacts (brief flicker) but state stays consistent  
+* Occasional ghost objects that self-correct
 
-The MVP isn’t about features — it’s about proving your foundation is solid. A simple canvas with bulletproof multiplayer is worth more than a feature-rich canvas with broken sync.
+**Satisfactory (4-5 points)**
 
-### Example Architecture
+* Simultaneous edits sometimes create duplicates  
+* Strategy unclear or undocumented  
+* State inconsistencies require refresh  
+* No indication of edit conflicts
 
-At minimum, you should have:
+**Poor (0-3 points)**
 
-1. A backend (Firestore, Supabase, or custom WebSocket server) that broadcasts updates.  
-2. A front-end listener that updates local canvas state and rebroadcasts deltas.  
-3. A persistence layer that saves the current state on disconnects.
+* Simultaneous edits frequently corrupt state  
+* Objects duplicate or disappear  
+* Different users see different canvas states  
+* Requires manual intervention to fix
 
-## Core Collaborative Canvas
+**Testing Scenarios for Conflict Resolution:**
 
-### Canvas Features
+1. Simultaneous Move: User A and User B both drag the same rectangle at the same time  
+2. Rapid Edit Storm: User A resizes object while User B changes its color while User C moves it  
+3. Delete vs Edit: User A deletes an object while User B is actively editing it  
+4. Create Collision: Two users create objects at nearly identical timestamps
 
-Your canvas needs a large workspace with a smooth pan and zoom. It doesn’t need to be truly infinite, but should feel spacious. Support basic shapes — rectangles, circles, and lines with solid colors. Add text layers with basic formatting.
+### Persistence & Reconnection (9 points)
 
-Users should be able to transform objects (move, resize, rotate). Include selection for single and multiple objects (shift-click or drag-to-select). Add layer management and basic operations like delete and duplicate.
+**Excellent (8-9 points)**
 
-### Real-Time Collaboration
+* User refreshes mid-edit → returns to exact state  
+* All users disconnect → canvas persists fully  
+* Network drop (30s+) → auto-reconnects with complete state  
+* Operations during disconnect queue and sync on reconnect  
+* Clear UI indicator for connection status
 
-Every user should see multiplayer cursors with names moving in real time. When someone creates or modifies an object, it appears instantly for everyone. Show clear presence awareness of who’s currently editing.
+**Good (6-7 points)**
 
-Handle conflict resolution when multiple users edit simultaneously. (A “last write wins” approach is acceptable, but document your choice.)
+* Refresh preserves 95%+ of state  
+* Reconnection works but may lose last 1-2 operations  
+* Connection status shown  
+* Minor data loss on network issues
 
-Manage disconnects and reconnects without breaking the experience. Canvas state must persist — if all users leave and come back, their work should still be there.
+**Satisfactory (4-5 points)**
 
-### Testing Scenario
+* Refresh loses recent changes (last 10-30 seconds)  
+* Reconnection requires manual refresh  
+* Inconsistent persistence  
+* No clear connection indicators
 
-We’ll test with:
+**Poor (0-3 points)**
 
-1. 2 users editing simultaneously in different browsers.  
-2. One user refreshing mid-edit to confirm state persistence.  
-3. Multiple shapes being created and moved rapidly to test sync performance.
+* Refresh loses significant work  
+* Reconnection fails or requires new session  
+* Canvas resets when last user leaves  
+* Frequent data loss
 
-### Performance Targets
+**Testing Scenarios for Persistence:**
 
-* Maintain 60 FPS during all interactions (pan, zoom, object manipulation).  
-* Sync object changes across users in \<100ms and cursor positions in \<50ms.  
-* Support 500+ simple objects without FPS drops and 5+ concurrent users without degradation.
+1. Mid-Operation Refresh: User drags object, refreshes browser mid-drag → object position preserved  
+2. Total Disconnect: All users close browsers, wait 2 minutes, return → full canvas state intact  
+3. Network Simulation: Throttle network to 0 for 30 seconds, restore → canvas syncs without data loss  
+4. Rapid Disconnect: User makes 5 rapid edits, immediately closes tab → edits persist for other users
 
-We’ll test performance on your deployed app, so make sure it works under load.
+---
 
-## AI Canvas Agent
+## Section 2: Canvas Features & Performance (20 points)
 
-### The AI Feature
+### Canvas Functionality (8 points)
 
-Build an AI agent that manipulates your canvas through natural language using function calling.
+**Excellent (7-8 points)**
 
-When a user types “Create a blue rectangle in the center,” the AI agent calls your canvas API functions, and the rectangle appears on everyone’s canvas via real-time sync.
+* Smooth pan/zoom  
+* 3+ shape types  
+* Text with formatting  
+* Multi-select (shift-click or drag)  
+* Layer management  
+* Transform operations (move/resize/rotate)  
+* Duplicate/delete
 
-### Required Capabilities
+**Good (5-6 points)**
 
-Your AI agent must support at least 6 distinct commands showing a range of creation, manipulation, and layout actions.
+* All basic requirements met  
+* 2+ shapes  
+* Transforms work well  
+* Basic text support
 
-#### Creation Commands:
+**Satisfactory (3-4 points)**
 
-* “Create a red circle at position 100, 200”  
-* “Add a text layer that says ‘Hello World’”  
-* “Make a 200x300 rectangle”
+* Basic shapes and movement  
+* Limited transform capabilities  
+* Single selection only
 
-#### Manipulation Commands:
+**Poor (0-2 points)**
 
-* “Move the blue rectangle to the center”  
-* “Resize the circle to be twice as big”  
-* “Rotate the text 45 degrees”
+* Missing core features  
+* Broken transforms  
+* Poor or no text support
 
-#### Layout Commands:
+### Performance & Scalability (12 points)
 
-* “Arrange these shapes in a horizontal row”  
-* “Create a grid of 3x3 squares”  
-* “Space these elements evenly”
+**Excellent (11-12 points)**
 
-#### Complex Commands:
+* Consistent performance with 500+ objects  
+* Supports 5+ concurrent users  
+* No degradation under load  
+* Smooth interactions at scale
 
-* “Create a login form with username and password fields”  
-* “Build a navigation bar with 4 menu items”  
-* “Make a card layout with title, image, and description”
+**Good (9-10 points)**
 
-#### Example Evaluation Criteria
+* Consistent performance with 300+ objects  
+* Handles 4-5 users  
+* Minor slowdown under heavy load
 
-When you say:
+**Satisfactory (6-8 points)**
 
-“Create a login form,” …We expect the AI to create at least three inputs (username, password, submit), arranged neatly, not just a text box.
+* Consistent performance with 100+ objects  
+* 2-3 users supported  
+* Noticeable lag with complexity
 
-### Technical Implementation
+**Poor (0-5 points)**
 
-Define a tool schema that your AI can call, such as:
+* Fails performance targets  
+* Drops below 60 FPS easily  
+* Can't handle multiple users
 
-```ts
-createShape(type, x, y, width, height, color)
-moveShape(shapeId, x, y)
-resizeShape(shapeId, width, height)
-rotateShape(shapeId, degrees)
-createText(text, x, y, fontSize, color)
-getCanvasState() // returns current canvas objects for context
-```
+---
 
-We recommend OpenAI’s function calling or LangChain tools for interpretation.  
-For complex operations (e.g. “create a login form”), your AI should plan steps upfront (create fields, align, group) and execute sequentially.
+## Section 3: Advanced Figma-Inspired Features (15 points)
 
-#### Shared AI State
+### Overall Scoring
 
-All users must see the same AI-generated results. If one user asks the AI to create something, everyone should see it. Multiple users should be able to use the AI simultaneously without conflict.
+**Excellent (13-15 points):** 3 Tier 1 \+ 2 Tier 2 \+ 1 Tier 3 features, all working excellently  
+**Good (10-12 points):** 2-3 Tier 1 \+ 1-2 Tier 2 features, all working well  
+**Satisfactory (6-9 points):** 2-3 Tier 1 features OR 1 Tier 2 feature working adequately  
+**Poor (0-5 points):** Only 0-1 additional features or features poorly implemented
 
-#### AI Agent Performance Targets
+### Feature Tiers
 
-* Latency: Responses under 2 seconds for single-step commands.  
-* Breadth: Handles 6+ command types.  
-* Complexity: Executes multi-step operations.  
-* Reliability: Consistent and accurate execution.  
-* UX: Natural interaction with visible, immediate feedback.
+**Tier 1 Features (2 points each, max 3 features \= 6 points)**
 
-#### AI Development Log
+* Color picker with recent colors/saved palettes  
+* Undo/redo with keyboard shortcuts (Cmd+Z/Cmd+Shift+Z)  
+* Keyboard shortcuts for common operations (Delete, Duplicate, Arrow keys to move)  
+* Export canvas or objects as PNG/SVG  
+* Snap-to-grid or smart guides when moving objects  
+* Object grouping/ungrouping  
+* Copy/paste functionality
 
-You must submit a 1-page breakdown documenting your AI-first development process.
+**Tier 2 Features (3 points each, max 2 features \= 6 points)**
 
-Include:
+* Component system (create reusable components/symbols)  
+* Layers panel with drag-to-reorder and hierarchy  
+* Alignment tools (align left/right/center, distribute evenly)  
+* Z-index management (bring to front, send to back)  
+* Selection tools (lasso select, select all of type)  
+* Styles/design tokens (save and reuse colors, text styles)  
+* Canvas frames/artboards for organizing work
 
-1. Tools & Workflow: What AI coding tools you used and how you integrated them.  
-2. Prompting Strategies: 3–5 effective prompts that worked well.  
-3. Code Analysis: Rough percentage of AI-generated vs hand-written code.  
-4. Strengths & Limitations: Where AI excelled and where it struggled.  
-5. Key Learnings: Insights about working with AI coding agents.
+**Tier 3 Features (3 points each, max 1 feature \= 3 points)**
 
-#### Technical Stack
+* Auto-layout (flexbox-like automatic spacing and sizing)  
+* Collaborative comments/annotations on objects  
+* Version history with restore capability  
+* Plugins or extensions system  
+* Vector path editing (pen tool with bezier curves)  
+* Advanced blend modes and opacity  
+* Prototyping/interaction modes (clickable links between frames)
 
-Recommended (not required):
+---
 
-* Backend: Firebase (Firestore, Realtime DB, Auth), or AWS (DynamoDB, Lambda, WebSockets)  
-* Frontend: React, Vue, Svelte, or Vanilla JS with Konva.js, Fabric.js, PixiJS, or HTML5 Canvas  
-* AI Integration: OpenAI GPT-4 or Anthropic Claude (function calling support)
+## Section 4: AI Canvas Agent (25 points)
 
-Use whatever stack helps you ship the best product.
+### Command Breadth & Capability (10 points)
 
-## Build Strategy
+**Excellent (9-10 points)**
 
-### Start with the Hard Part
+* 8+ distinct command types  
+* Covers all categories: creation, manipulation, layout, complex  
+* Commands are diverse and meaningful
 
-Multiplayer sync is the hardest and most important part.  
-Get two cursors syncing → objects syncing → handle conflicts → persist state.  
-Only after this is solid should you add shapes, transformations, and AI.
+**Good (7-8 points)**
 
-### Build Vertically
+* 6-7 command types  
+* Covers most categories  
+* Good variety
 
-Finish one layer at a time:
+**Satisfactory (5-6 points)**
 
-1. Cursor sync  
-2. Object sync  
-3. Transformations  
-4. Basic AI commands  
-5. Complex AI commands
+* Exactly 6 command types  
+* Limited variety  
+* Minimal category coverage
 
-Avoid half-finished features. Multiplayer last \= failure.
+**Poor (0-4 points)**
 
-### Test Continuously
+* Fewer than 6 commands  
+* Commands don't work reliably  
+* Very limited scope
 
-Use multiple browser windows, throttle network speed, test with 3–4 users, and run simultaneous AI commands. We’ll test under real conditions — test like we will.
+### AI Command Categories (must demonstrate variety):
 
-## Submission Requirements
+**Creation Commands (at least 2 required)**
 
-Submit the following by **Sunday 10:59 PM CT**:
+* "Create a red circle at position 100, 200"  
+* "Add a text layer that says 'Hello World'"  
+* "Make a 200x300 rectangle"
 
-1. **GitHub Repository** – with setup guide, architecture overview, and deployed link.  
-2. **Demo Video (3–5 minutes)** – show real-time collaboration, AI commands, and explain your architecture.  
-3. **AI Development Log (1 page)** – using the provided template.  
-4. **Deployed Application** – publicly accessible, supporting 5+ users with authentication.
+**Manipulation Commands (at least 2 required)**
 
-We recommend deploying on **Vercel**, **Firebase Hosting**, or **Render** for simplicity.
+* "Move the blue rectangle to the center"  
+* "Resize the circle to be twice as big"  
+* "Rotate the text 45 degrees"
 
-## Final Note
+**Layout Commands (at least 1 required)**
 
-This project mirrors what the best AI startups are doing right now — combining real-time collaboration with intelligent AI creation.
+* "Arrange these shapes in a horizontal row"  
+* "Create a grid of 3x3 squares"  
+* "Space these elements evenly"
 
-The closer you get to that experience, the more you’ll understand what it takes to build the next Figma.
+**Complex Commands (at least 1 required)**
 
-*A simple, solid, multiplayer canvas with a working AI agent beats any feature-rich app with broken collaboration.*
+* "Create a login form with username and password fields"  
+* "Build a navigation bar with 4 menu items"  
+* "Make a card layout with title, image, and description"
 
-**Let’s build something real.**  
+### Complex Command Execution (8 points)
+
+**Excellent (7-8 points)**
+
+* "Create login form" produces 3+ properly arranged elements  
+* Complex layouts execute multi-step plans correctly  
+* Smart positioning and styling  
+* Handles ambiguity well
+
+**Good (5-6 points)**
+
+* Complex commands work but simpler implementations  
+* Basic layouts created  
+* 2-3 elements arranged
+
+**Satisfactory (3-4 points)**
+
+* Basic interpretation of complex commands  
+* Poor layout quality  
+* Elements created but not arranged
+
+**Poor (0-2 points)**
+
+* Complex commands fail  
+* Nonsensical results  
+* Cannot handle multi-step operations
+
+### AI Performance & Reliability (7 points)
+
+**Excellent (6-7 points)**
+
+* Sub-2 second responses  
+* 90%+ accuracy  
+* Natural UX with feedback  
+* Shared state works flawlessly  
+* Multiple users can use AI simultaneously
+
+**Good (4-5 points)**
+
+* 2-3 second responses  
+* 80%+ accuracy  
+* Good UX  
+* Shared state mostly works  
+* Minor conflicts with multi-user AI
+
+**Satisfactory (2-3 points)**
+
+* 3-5 second responses  
+* 60%+ accuracy  
+* Basic UX  
+* Shared state has issues
+
+**Poor (0-1 points)**
+
+* Slow responses (5s+)  
+* Unreliable execution  
+* Broken shared state  
+* Poor or no UX feedback
+
+---
+
+## Section 5: Technical Implementation (10 points)
+
+### Architecture Quality (5 points)
+
+**Excellent (5 points)**
+
+* Clean, well-organized code  
+* Clear separation of concerns  
+* Scalable architecture  
+* Proper error handling  
+* Modular components
+
+**Good (4 points)**
+
+* Solid structure  
+* Minor organizational issues  
+* Generally maintainable
+
+**Satisfactory (3 points)**
+
+* Functional but messy  
+* Some architectural concerns  
+* Limited modularity
+
+**Poor (0-2 points)**
+
+* Poor code organization  
+* Architectural problems  
+* Difficult to maintain
+
+### Authentication & Security (5 points)
+
+**Excellent (5 points)**
+
+* Robust auth system  
+* Secure user management  
+* Proper session handling  
+* Protected routes  
+* No exposed credentials
+
+**Good (4 points)**
+
+* Functional auth  
+* Minor security considerations  
+* Generally secure
+
+**Satisfactory (3 points)**
+
+* Basic auth works  
+* Some security gaps  
+* Needs improvement
+
+**Poor (0-2 points)**
+
+* Broken authentication  
+* Insecure implementation  
+* Major vulnerabilities
+
+---
+
+## Section 6: Documentation & Submission Quality (5 points)
+
+### Repository & Setup (3 points)
+
+**Excellent (3 points)**
+
+* Clear README  
+* Detailed setup guide  
+* Architecture documentation  
+* Easy to run locally  
+* Dependencies listed
+
+**Good (2 points)**
+
+* Adequate documentation  
+* Setup mostly clear  
+* Can be run with some effort
+
+**Satisfactory (1 point)**
+
+* Minimal documentation  
+* Setup unclear  
+* Missing key info
+
+**Poor (0 points)**
+
+* Missing or inadequate documentation  
+* Cannot be set up
+
+### Deployment (2 points)
+
+**Excellent (2 points)**
+
+* Stable deployment  
+* Publicly accessible  
+* Supports 5+ users  
+* Fast load times
+
+**Good (1 point)**
+
+* Deployed  
+* Minor stability issues  
+* Generally accessible
+
+**Poor (0 points)**
+
+* Broken deployment  
+* Not accessible  
+* Major issues
+
+---
+
+## Section 7: AI Development Log (Required \- Pass/Fail)
+
+PASS Requirements: Must include **ANY 3 out of 5 sections** with meaningful reflection:
+
+1. **Tools & Workflow used** \- What AI tools you used and how you integrated them  
+2. **3-5 effective prompting strategies** \- Specific prompts that worked well  
+3. **Code analysis** \- Rough percentage of AI-generated vs hand-written code  
+4. **Strengths & limitations** \- Where AI excelled and where it struggled  
+5. **Key learnings** \- Insights about working with AI coding agents
+
+---
+
+## 
+
+## Section 8: Demo Video (Required \- Pass/Fail)
+
+**PASS Requirements**: 3-5 minute video demonstrating:
+
+* Real-time collaboration with 2+ users (show both screens)  
+* Multiple AI commands executing  
+* Advanced features walkthrough  
+* Architecture explanation  
+* Clear audio and video quality
+
+**FAIL Penalty**: Missing requirements OR poor quality OR not submitted \= \-10 points
+
+---
+
+## Bonus Points (Maximum \+5)
+
+**Innovation (+2 points)**
+
+* Novel features beyond requirements  
+* Examples: AI-powered design suggestions, smart component detection, generative design tools
+
+**Polish (+2 points)**
+
+* Exceptional UX/UI  
+* Smooth animations  
+* Professional design system  
+* Delightful interactions
+
+**Scale (+1 point)**
+
+* Demonstrated performance beyond targets  
+* 1000+ objects at 60 FPS  
+* 10+ concurrent users
+
+
+---
+
+## Grade Scale
+
+**A (90-100 points)**: Exceptional implementation, exceeds all targets, production-ready quality  
+**B (80-89 points)**: Strong implementation, meets all core requirements, good quality  
+**C (70-79 points)**: Functional implementation, meets most requirements, acceptable quality  
+**D (60-69 points)**: Basic implementation, significant gaps, needs improvement  
+**F (\<60 points)**: Does not meet minimum requirements, major issues

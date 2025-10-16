@@ -22,6 +22,8 @@ type Shape = {
   sides?: number;
   rotation?: number;
   z?: number;
+
+  name?: string; // NEW
 };
 
 type Annotation = {
@@ -313,6 +315,57 @@ export default function CanvasViewport({ userId }: Props) {
       wy: offsetRef.current.y + sy / scaleRef.current,
     };
   }, []);
+
+  const [wordlists, setWordlists] = useState<{ adjs: string[]; nouns: string[] } | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const [aRes, nRes] = await Promise.all([
+        fetch("/names/adjectives.txt"),
+        fetch("/names/nouns.txt"),
+      ]);
+      const [aText, nText] = await Promise.all([aRes.text(), nRes.text()]);
+      if (!alive) return;
+      const adjs = aText.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+      const nouns = nText.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+      setWordlists({ adjs, nouns });
+    })();
+    return () => { alive = false; };
+  }, []);
+
+  // helper: TitleCase and concat
+  const cap = (s: string) => s ? s[0].toUpperCase() + s.slice(1) : s;
+  const toName = (adj: string, noun: string) => `${cap(adj)}${cap(noun)}`;
+
+  const usedNames = () => {
+    const set = new Set<string>();
+    for (const s of shapesRef.current.values()) {
+      if (s.name) set.add(s.name.toLowerCase());
+    }
+    return set;
+  };
+
+  function randomName(adjs: string[], nouns: string[]): string {
+    const taken = usedNames();
+    // simple LCG-based deterministic-ish from timestamp to reduce repetition across tabs
+    let seed = Date.now() ^ Math.floor(Math.random() * 0x9e3779b1);
+    const lcg = () => (seed = (seed * 1664525 + 1013904223) >>> 0);
+
+    const maxTries = 5000;
+    for (let i = 0; i < maxTries; i++) {
+      const ai = lcg() % adjs.length;
+      const ni = lcg() % nouns.length;
+      const name = toName(adjs[ai], nouns[ni]);
+      if (!taken.has(name.toLowerCase())) return name;
+    }
+    // Worst case: append a number
+    let base = toName(adjs[lcg() % adjs.length], nouns[lcg() % nouns.length]);
+    let k = 2;
+    while (taken.has(`${base}${k}`.toLowerCase())) k++;
+    return `${base}${k}`;
+  }
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
 
   // ===== presence =====
   const tabIdRef = useRef(getTabId());
@@ -687,6 +740,16 @@ export default function CanvasViewport({ userId }: Props) {
       });
     });
 
+    ch.on("broadcast", { event: "shape-name" }, ({ payload }: { payload: { id: string; name: string; updated_at?: string } }) => {
+      setShapes(prev => {
+        const m = new Map(prev);
+        const s = m.get(payload.id);
+        if (!s) return prev;
+        m.set(payload.id, { ...s, name: payload.name, updated_at: payload.updated_at ?? s.updated_at });
+        return m;
+      });
+    });
+
     ch.subscribe();
     return () => {
       try { ch.unsubscribe(); } catch {}
@@ -709,6 +772,51 @@ export default function CanvasViewport({ userId }: Props) {
     })();
     return () => { active = false; };
   }, []);
+
+  // After the existing initial shapes fetch (or in a subsequent effect)
+  useEffect(() => {
+    if (!wordlists) return;
+    // find nameless shapes
+    const nameless = Array.from(shapesRef.current.values()).filter(s => !s.name);
+    if (nameless.length === 0) return;
+
+    const updates: Array<{ id: string; name: string }> = [];
+    for (const s of nameless) {
+      const name = randomName(wordlists.adjs, wordlists.nouns);
+      updates.push({ id: s.id, name });
+    }
+
+    if (updates.length === 0) return;
+
+    // optimistic local update
+    setShapes(prev => {
+      const m = new Map(prev);
+      const now = nowIso();
+      for (const u of updates) {
+        const cur = m.get(u.id); if (!cur) continue;
+        m.set(u.id, { ...cur, name: u.name, updated_at: now });
+      }
+      return m;
+    });
+
+    // broadcast each
+    for (const u of updates) {
+      shapesChRef.current?.send({ type: "broadcast", event: "shape-name", payload: { id: u.id, name: u.name, updated_at: nowIso() } });
+    }
+
+    // persist (batched update)
+    (async () => {
+      try {
+        // If your Supabase allows upsert-like update by array, great.
+        // Otherwise loop; keeping simple & robust:
+        for (const u of updates) {
+          await supabase.from("shapes").update({ name: u.name, updated_at: nowIso() }).eq("id", u.id);
+        }
+      } catch (e) {
+        console.warn("Backfill names failed:", e);
+      }
+    })();
+  }, [wordlists]);
 
   // ===== Hit test (z-aware) =====
   const pickShapeEvt = useCallback((e: React.MouseEvent<SVGSVGElement>): Shape | null => {
@@ -1066,11 +1174,13 @@ export default function CanvasViewport({ userId }: Props) {
       setDrag({ kind: "none" });
       if (nw >= 3 && nh >= 3) {
         const id = (typeof crypto !== "undefined" && "randomUUID" in crypto) ? crypto.randomUUID() : `shape_${Math.random().toString(36).slice(2)}`;
+        const name = wordlists ? randomName(wordlists.adjs, wordlists.nouns) : undefined;
         const shape: Shape = {
           id, created_by: userId,
           x: nx, y: ny, width: nw, height: nh,
           stroke: "#000000", stroke_width: 2, fill: "#ffffff",
           updated_at: nowIso(), sides: 4, rotation: 0, z: frontZ(),
+          name, // NEW
         };
         upsertShapeLocal(shape);
         shapesChRef.current?.send({ type: "broadcast", event: "shape-create", payload: shape });
@@ -1499,14 +1609,18 @@ export default function CanvasViewport({ userId }: Props) {
     if (drag.kind !== "none") return;
     const { wx, wy } = worldFromSvgEvent(e);
     const threshWorld = 10 / scaleRef.current;
+    let hovered: string | null = null;
+
     for (let i = shapeOrdered.length - 1; i >= 0; i--) {
       const s = shapeOrdered[i];
-      if (nearPerimeter(s, wx, wy, threshWorld)) {
+      if (pointInShape(s, wx, wy) || nearPerimeter(s, wx, wy, threshWorld)) {
+        hovered = s.id;
         setSvgCursor(cursorForPerimeter(s, wx, wy, e.metaKey || e.ctrlKey));
-        return;
+        break;
       }
     }
-    setSvgCursor("default");
+    if (!hovered) setSvgCursor("default");
+    setHoveredId(hovered);
   }, [drag.kind, shapeOrdered, worldFromSvgEvent]);
 
   // ===== Render =====
@@ -1532,7 +1646,7 @@ export default function CanvasViewport({ userId }: Props) {
         style={{ cursor: svgCursor }}
         onMouseDown={onLeftDown}
         onMouseMove={(e) => { updateHoverCursor(e); onLeftMove(e); }}
-        onMouseLeave={() => setSvgCursor("default")}
+        onMouseLeave={() => { setSvgCursor("default"); setHoveredId(null); }}
         onMouseUp={onLeftUp}
         onDoubleClick={onDoubleClickSVG}
       >
@@ -1631,6 +1745,28 @@ export default function CanvasViewport({ userId }: Props) {
           );
         })}
       </div>
+
+      {/* Hover name label */}
+      {hoveredId && (() => {
+        const s = shapesRef.current.get(hoveredId);
+        if (!s || !s.name) return null;
+        // position near the top-left of the shape in screen space
+        const x = Math.min(s.x, s.x + s.width);
+        const y = Math.min(s.y, s.y + s.height);
+        const sx = (x - offsetRef.current.x) * scaleRef.current;
+        const sy = (y - offsetRef.current.y) * scaleRef.current;
+
+        return (
+          <div
+            className="absolute pointer-events-none"
+            style={{ transform: `translate(${sx + 8}px, ${sy - 24}px)` }}
+          >
+            <div className="rounded-md bg-black/80 px-2 py-1 text-xs text-white shadow">
+              {s.name}
+            </div>
+          </div>
+        );
+      })()} 
 
       {/* Properties & Annotations Modal */}
       {modalShapeId && (() => {

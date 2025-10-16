@@ -18,9 +18,10 @@ type Shape = {
   fill: string | null;
   updated_at?: string;
 
-  // geometry extensions
-  sides?: number;       // 0 = ellipse, 3+ = regular polygon, default 4
-  rotation?: number;    // radians, default 0
+  // NEW
+  sides?: number;
+  rotation?: number;
+  z?: number; // floating z-index (higher occludes lower)
 };
 
 type Annotation = {
@@ -212,6 +213,9 @@ export default function CanvasViewport({ userId }: Props) {
   const [annotationInput, setAnnotationInput] = useState("");
   const [sidesInput, setSidesInput] = useState<string>("");
 
+  // NEW: z-index input
+  const [zInput, setZInput] = useState<string>("");
+
   // refs mirror latest values
   const offsetRef = useRef(offset);
   const cursorRef = useRef(cursor);
@@ -233,76 +237,6 @@ export default function CanvasViewport({ userId }: Props) {
       wy: offsetRef.current.y + sy / scaleRef.current,
     };
   }, []);
-
-  const cursorForPerimeter = (s: Shape, wx: number, wy: number, modForRotate: boolean) => {
-    if (modForRotate) return "grab" as const;
-
-    const sides = resolveSides(s.sides);
-    const threshWorld = 10 / scaleRef.current; // keep in sync with hover/pick
-    const corner = nearCorner(s, wx, wy, threshWorld);
-
-    if (corner && corner.type === "rect") {
-      // Map corner signs to CSS cursor
-      // (sx,sy) = (+,+) or (-,-) ⇒ nwse; (+,-) or (-,+) ⇒ nesw
-      const diag = (corner.sx === corner.sy) ? "nwse-resize" : "nesw-resize";
-      return diag as "nwse-resize" | "nesw-resize";
-    }
-
-    if (sides === 4) {
-      // Edge-only (fallback): pick axis
-      const { lx, ly } = worldToLocal(s, wx, wy);
-      const rx = Math.abs(s.width) / 2;
-      const ry = Math.abs(s.height) / 2;
-      const dx = Math.abs(Math.abs(lx) - rx);
-      const dy = Math.abs(Math.abs(ly) - ry);
-      return (dx < dy) ? ("ew-resize" as const) : ("ns-resize" as const);
-    }
-
-    return "crosshair" as const;
-  };
-
-  // Returns which corner we are near for rectangles, or near a polygon vertex.
-  // For rect: corners are (±rx, ±ry). For others: checks polygon vertices.
-  // Returns {sx, sy} for rect corners; for polygons returns {i}, we’ll treat as uniform scale.
-  const nearCorner = (s: Shape, wx: number, wy: number, threshWorld: number):
-    | { type: "rect", sx: 1 | -1, sy: 1 | -1 }
-    | { type: "poly", i: number }
-    | null => {
-    const sides = resolveSides(s.sides);
-    const { lx, ly } = worldToLocal(s, wx, wy);
-    const rx = Math.abs(s.width) / 2;
-    const ry = Math.abs(s.height) / 2;
-
-    // Rect corners
-    if (sides === 4) {
-      const candidates: Array<{ sx: 1|-1, sy: 1|-1, cx: number, cy: number }> = [
-        { sx:  1, sy:  1, cx:  rx, cy:  ry },
-        { sx:  1, sy: -1, cx:  rx, cy: -ry },
-        { sx: -1, sy:  1, cx: -rx, cy:  ry },
-        { sx: -1, sy: -1, cx: -rx, cy: -ry },
-      ];
-      for (const c of candidates) {
-        const d = Math.hypot(lx - c.cx, ly - c.cy);
-        if (d <= threshWorld) return { type: "rect", sx: c.sx, sy: c.sy };
-      }
-      return null;
-    }
-
-    // Polygon vertices (including ellipse treated as n≈16 reference points)
-    const n = sides === 0 ? 16 : sides;
-    const start = -Math.PI / 2;
-    const verts: Array<[number, number]> = [];
-    for (let i = 0; i < n; i++) {
-      const a = start + (i * 2 * Math.PI) / n;
-      verts.push([rx * Math.cos(a), ry * Math.sin(a)]);
-    }
-    for (let i = 0; i < n; i++) {
-      const [vx, vy] = verts[i];
-      const d = Math.hypot(lx - vx, ly - vy);
-      if (d <= threshWorld) return { type: "poly", i };
-    }
-    return null;
-  };
 
   // ===== Supabase presence channel (for tuples & remote cursors) =====
   const tabIdRef = useRef(getTabId());
@@ -555,6 +489,21 @@ export default function CanvasViewport({ userId }: Props) {
   const shapeList = useMemo(() => Array.from(shapes.values()), [shapes]);
   useEffect(() => { shapesRef.current = shapes; }, [shapes]);
 
+  // ORDER: z asc, then updated_at asc, then id asc (draw in this order; topmost last)
+  const shapeOrderCmp = (a: Shape, b: Shape) => {
+    const za = a.z ?? 0, zb = b.z ?? 0;
+    if (za !== zb) return za - zb;
+    const ta = new Date(a.updated_at ?? 0).getTime();
+    const tb = new Date(b.updated_at ?? 0).getTime();
+    if (ta !== tb) return ta - tb;
+    return a.id.localeCompare(b.id);
+  };
+  const shapeOrdered = useMemo(() => {
+    const arr = Array.from(shapes.values());
+    arr.sort(shapeOrderCmp);
+    return arr;
+  }, [shapes]);
+
   const upsertShapeLocal = useCallback((s: Shape) => {
     setShapes(prev => {
       const m = new Map(prev);
@@ -569,6 +518,18 @@ export default function CanvasViewport({ userId }: Props) {
       return m;
     });
   }, []);
+
+  // Helpers to compute front/back integer layers
+  const frontZ = () => {
+    const values = Array.from(shapesRef.current.values());
+    const maxZ = values.length ? Math.max(...values.map(s => s.z ?? 0)) : 0;
+    return Math.floor(maxZ) + 1;
+  };
+  const backZ = () => {
+    const values = Array.from(shapesRef.current.values());
+    const minZ = values.length ? Math.min(...values.map(s => s.z ?? 0)) : 0;
+    return Math.ceil(minZ) - 1;
+  };
 
   // Live-sync channel
   const shapesChRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
@@ -627,6 +588,19 @@ export default function CanvasViewport({ userId }: Props) {
       });
     });
 
+    // NEW: z-index updates
+    ch.on("broadcast", { event: "shape-z" }, ({ payload }: { payload: { ids: string[]; z: number; updated_at?: string } }) => {
+      setShapes(prev => {
+        const m = new Map(prev);
+        for (const id of payload.ids) {
+          const s = m.get(id);
+          if (!s) continue;
+          m.set(id, { ...s, z: payload.z, updated_at: payload.updated_at ?? s.updated_at });
+        }
+        return m;
+      });
+    });
+
     ch.subscribe();
 
     return () => {
@@ -651,38 +625,35 @@ export default function CanvasViewport({ userId }: Props) {
     return () => { active = false; };
   }, []);
 
-  // ===== Hit test helpers using real geometry =====
+  // ===== Hit test helpers using real geometry & z-order =====
   const pickShape = useCallback((clientX: number, clientY: number): Shape | null => {
     const wx = offsetRef.current.x + clientX / scaleRef.current;
     const wy = offsetRef.current.y + clientY / scaleRef.current;
-    const arr = Array.from(shapes.values());
-    for (let i = arr.length - 1; i >= 0; i--) {
-      const s = arr[i];
+    for (let i = shapeOrdered.length - 1; i >= 0; i--) {
+      const s = shapeOrdered[i];
       if (pointInShape(s, wx, wy)) return s;
     }
     return null;
-  }, [shapes]);
+  }, [shapeOrdered]);
 
   const pickShapeEvt = useCallback((e: React.MouseEvent<SVGSVGElement>): Shape | null => {
     const { wx, wy } = worldFromSvgEvent(e);
-    const arr = Array.from(shapes.values());
-    for (let i = arr.length - 1; i >= 0; i--) {
-      const s = arr[i];
+    for (let i = shapeOrdered.length - 1; i >= 0; i--) {
+      const s = shapeOrdered[i];
       if (pointInShape(s, wx, wy)) return s;
     }
     return null;
-  }, [shapes]);
+  }, [shapeOrdered, worldFromSvgEvent]);
 
   const pickPerimeter = useCallback((e: React.MouseEvent<SVGSVGElement>): Shape | null => {
     const { wx, wy } = worldFromSvgEvent(e);
     const threshWorld = 10 / scaleRef.current; // ~10px band
-    const arr = Array.from(shapes.values());
-    for (let i = arr.length - 1; i >= 0; i--) {
-      const s = arr[i];
+    for (let i = shapeOrdered.length - 1; i >= 0; i--) {
+      const s = shapeOrdered[i];
       if (nearPerimeter(s, wx, wy, threshWorld)) return s;
     }
     return null;
-  }, [shapes]);
+  }, [shapeOrdered, worldFromSvgEvent]);
 
   // ===== Drag state (create / move / resize / rotate) =====
   type DragState =
@@ -694,9 +665,9 @@ export default function CanvasViewport({ userId }: Props) {
         id: string;
         startWorld: { x: number; y: number };
         start: Shape;
-        lock: "x" | "y" | "uniform" | "corner"; // NEW includes "corner"
+        lock: "x" | "y" | "uniform" | "corner";
         startHalf: { rx: number; ry: number };
-        cornerSign?: { sx: 1 | -1; sy: 1 | -1 }; // NEW for corner lock
+        cornerSign?: { sx: 1 | -1; sy: 1 | -1 };
       }
     | { kind: "rotating"; id: string; startAngle: number; initialRot: number };
 
@@ -712,6 +683,67 @@ export default function CanvasViewport({ userId }: Props) {
     });
   };
 
+  // Corner helper (inside component)
+  const nearCorner = (
+    s: Shape,
+    wx: number,
+    wy: number,
+    threshWorld: number
+  ): { type: "rect"; sx: 1 | -1; sy: 1 | -1 } | { type: "poly"; i: number } | null => {
+    const sides = resolveSides(s.sides);
+    const { lx, ly } = worldToLocal(s, wx, wy);
+    const rx = Math.abs(s.width) / 2;
+    const ry = Math.abs(s.height) / 2;
+
+    if (sides === 4) {
+      const candidates = [
+        { sx:  1 as const, sy:  1 as const, cx:  rx, cy:  ry },
+        { sx:  1 as const, sy: -1 as const, cx:  rx, cy: -ry },
+        { sx: -1 as const, sy:  1 as const, cx: -rx, cy:  ry },
+        { sx: -1 as const, sy: -1 as const, cx: -rx, cy: -ry },
+      ];
+      for (const c of candidates) {
+        if (Math.hypot(lx - c.cx, ly - c.cy) <= threshWorld) {
+          return { type: "rect", sx: c.sx, sy: c.sy };
+        }
+      }
+      return null;
+    }
+
+    const n = sides === 0 ? 16 : sides;
+    const start = -Math.PI / 2;
+    for (let i = 0; i < n; i++) {
+      const a = start + (i * 2 * Math.PI) / n;
+      const vx = rx * Math.cos(a), vy = ry * Math.sin(a);
+      if (Math.hypot(lx - vx, ly - vy) <= threshWorld) return { type: "poly", i };
+    }
+    return null;
+  };
+
+  const cursorForPerimeter = (s: Shape, wx: number, wy: number, modForRotate: boolean) => {
+    if (modForRotate) return "grab" as const;
+
+    const sides = resolveSides(s.sides);
+    const threshWorld = 10 / scaleRef.current; // keep in sync with hover/pick
+    const corner = nearCorner(s, wx, wy, threshWorld);
+
+    if (corner && corner.type === "rect") {
+      const diag = (corner.sx === corner.sy) ? "nwse-resize" : "nesw-resize";
+      return diag as "nwse-resize" | "nesw-resize";
+    }
+
+    if (sides === 4) {
+      const { lx, ly } = worldToLocal(s, wx, wy);
+      const rx = Math.abs(s.width) / 2;
+      const ry = Math.abs(s.height) / 2;
+      const dx = Math.abs(Math.abs(lx) - rx);
+      const dy = Math.abs(Math.abs(ly) - ry);
+      return (dx < dy) ? ("ew-resize" as const) : ("ns-resize" as const);
+    }
+
+    return "crosshair" as const;
+  };
+
   // ===== Left-drag on SVG =====
   const onLeftDown = useCallback((e: React.MouseEvent<SVGSVGElement>) => {
     if (e.button !== 0) return;
@@ -720,23 +752,19 @@ export default function CanvasViewport({ userId }: Props) {
     const peri = pickPerimeter(e);
     if (peri) {
       const { wx, wy } = worldFromSvgEvent(e);
-      // Inside onLeftDown, peri branch with { wx, wy } ready
       if (e.metaKey || e.ctrlKey) {
-        // rotation unchanged
         const { cx, cy } = shapeCenter(peri);
         const ang0 = Math.atan2(wy - cy, wx - cx);
         setDrag({ kind: "rotating", id: peri.id, startAngle: ang0, initialRot: peri.rotation ?? 0 });
         return;
       }
 
-      // Try corner first
       const threshWorld = 10 / scaleRef.current;
       const corner = nearCorner(peri, wx, wy, threshWorld);
 
       const sides = resolveSides(peri.sides);
       const theta = peri.rotation ?? 0;
       const { cx, cy } = shapeCenter(peri);
-      // world → local
       const dxw = wx - cx, dyw = wy - cy;
       const c = Math.cos(-theta), si = Math.sin(-theta);
       const lx = dxw * c - dyw * si;
@@ -746,7 +774,6 @@ export default function CanvasViewport({ userId }: Props) {
       const ry0 = Math.abs(peri.height) / 2;
 
       if (corner) {
-        // RECT: free XY with a fixed opposite corner; POLY/ELLIPSE: uniform (keeps shape)
         const lock: "corner" | "uniform" = (corner.type === "rect") ? "corner" : "uniform";
         setDrag({
           kind: "resizing",
@@ -760,7 +787,6 @@ export default function CanvasViewport({ userId }: Props) {
         return;
       }
 
-      // Edge fallback (your previous pick-axis / uniform rules)
       let lock: "x" | "y" | "uniform";
       if (sides === 4) {
         const dxEdge = Math.abs(Math.abs(lx) - rx0);
@@ -800,7 +826,7 @@ export default function CanvasViewport({ userId }: Props) {
 
       const grabOffset = { dx: wx - picked.x, dy: wy - picked.y };
       setDrag({ kind: "moving", id: picked.id, grabOffset });
-      return; // IMPORTANT
+      return;
     }
 
     // 3) Background: marquee (shift) or create
@@ -823,9 +849,10 @@ export default function CanvasViewport({ userId }: Props) {
       fill: "#ffffff",
       sides: 4,
       rotation: 0,
+      z: undefined,
     };
     setDrag({ kind: "creating", start: { x: wx, y: wy }, ghost });
-  }, [userId, shapes, selectedIds, pickPerimeter, pickShapeEvt]);
+  }, [userId, shapes, selectedIds, pickPerimeter, pickShapeEvt, worldFromSvgEvent]);
 
   const onLeftMove = useCallback((e: React.MouseEvent<SVGSVGElement>) => {
     const { wx, wy } = worldFromSvgEvent(e);
@@ -883,64 +910,63 @@ export default function CanvasViewport({ userId }: Props) {
       return;
     }
 
-    // resizing (axis-locked / uniform)
-  if (drag.kind === "resizing") {
-    const { wx, wy } = worldFromSvgEvent(e as any);
-    const s0 = drag.start;
-    const { cx, cy } = shapeCenter(s0);
-    const theta = s0.rotation ?? 0;
+    // resizing (axis-locked / uniform / corner)
+    if (drag.kind === "resizing") {
+      const s0 = drag.start;
+      const { cx, cy } = shapeCenter(s0);
+      const theta = s0.rotation ?? 0;
 
-    // world → local at current cursor
-    const dxw = wx - cx, dyw = wy - cy;
-    const c = Math.cos(-theta), si = Math.sin(-theta);
-    const lx = dxw * c - dyw * si;
-    const ly = dxw * si + dyw * c;
+      // world → local at current cursor
+      const dxw = wx - cx, dyw = wy - cy;
+      const c = Math.cos(-theta), si = Math.sin(-theta);
+      const lx = dxw * c - dyw * si;
+      const ly = dxw * si + dyw * c;
 
-    const minHalf = 1.5;
-    let rx = drag.startHalf.rx;
-    let ry = drag.startHalf.ry;
+      const minHalf = 1.5;
+      let rx = drag.startHalf.rx;
+      let ry = drag.startHalf.ry;
 
-    if (drag.lock === "x") {
-      rx = Math.max(minHalf, Math.abs(lx));
-    } else if (drag.lock === "y") {
-      ry = Math.max(minHalf, Math.abs(ly));
-    } else if (drag.lock === "uniform") {
-      const kx = Math.abs(lx) / (drag.startHalf.rx || 1);
-      const ky = Math.abs(ly) / (drag.startHalf.ry || 1);
-      const k = Math.max(kx, ky, minHalf / Math.max(drag.startHalf.rx, drag.startHalf.ry));
-      rx = Math.max(minHalf, drag.startHalf.rx * k);
-      ry = Math.max(minHalf, drag.startHalf.ry * k);
-    } else {
-      // CORNER: free XY, both axes track cursor with minimums (rect only)
-      rx = Math.max(minHalf, Math.abs(lx));
-      ry = Math.max(minHalf, Math.abs(ly));
+      if (drag.lock === "x") {
+        rx = Math.max(minHalf, Math.abs(lx));
+      } else if (drag.lock === "y") {
+        ry = Math.max(minHalf, Math.abs(ly));
+      } else if (drag.lock === "uniform") {
+        const kx = Math.abs(lx) / (drag.startHalf.rx || 1);
+        const ky = Math.abs(ly) / (drag.startHalf.ry || 1);
+        const k = Math.max(kx, ky, minHalf / Math.max(drag.startHalf.rx, drag.startHalf.ry));
+        rx = Math.max(minHalf, drag.startHalf.rx * k);
+        ry = Math.max(minHalf, drag.startHalf.ry * k);
+      } else {
+        // CORNER: free XY, both axes track cursor with minimums (rect only)
+        rx = Math.max(minHalf, Math.abs(lx));
+        ry = Math.max(minHalf, Math.abs(ly));
+      }
+
+      const newW = Math.round(rx * 2);
+      const newH = Math.round(ry * 2);
+      const nx = Math.round(cx - newW / 2);
+      const ny = Math.round(cy - newH / 2);
+
+      setShapes(prev => {
+        const m = new Map(prev);
+        const cur = m.get(drag.id); if (!cur) return prev;
+        m.set(drag.id, { ...cur, x: nx, y: ny, width: newW, height: newH, updated_at: nowIso() });
+        return m;
+      });
+
+      shapesChRef.current?.send({
+        type: "broadcast",
+        event: "shape-resize",
+        payload: { id: drag.id, x: nx, y: ny, width: newW, height: newH, updated_at: nowIso() },
+      });
+
+      scheduleMoveUpdate(async () => {
+        await supabase.from("shapes")
+          .update({ x: nx, y: ny, width: newW, height: newH, updated_at: nowIso() })
+          .eq("id", drag.id);
+      });
+      return;
     }
-
-    const newW = Math.round(rx * 2);
-    const newH = Math.round(ry * 2);
-    const nx = Math.round(cx - newW / 2);
-    const ny = Math.round(cy - newH / 2);
-
-    setShapes(prev => {
-      const m = new Map(prev);
-      const cur = m.get(drag.id); if (!cur) return prev;
-      m.set(drag.id, { ...cur, x: nx, y: ny, width: newW, height: newH, updated_at: nowIso() });
-      return m;
-    });
-
-    shapesChRef.current?.send({
-      type: "broadcast",
-      event: "shape-resize",
-      payload: { id: drag.id, x: nx, y: ny, width: newW, height: newH, updated_at: nowIso() },
-    });
-
-    scheduleMoveUpdate(async () => {
-      await supabase.from("shapes")
-        .update({ x: nx, y: ny, width: newW, height: newH, updated_at: nowIso() })
-        .eq("id", drag.id);
-    });
-    return;
-  }
 
     // rotating
     if (drag.kind === "rotating") {
@@ -961,7 +987,7 @@ export default function CanvasViewport({ userId }: Props) {
       });
       return;
     }
-  }, [drag, marquee]);
+  }, [drag, marquee, worldFromSvgEvent]);
 
   const onLeftUp = useCallback(async () => {
     // finalize marquee
@@ -1001,6 +1027,7 @@ export default function CanvasViewport({ userId }: Props) {
           stroke: "#000000", stroke_width: 2, fill: "#ffffff",
           updated_at: nowIso(),
           sides: 4, rotation: 0,
+          z: frontZ(), // NEW: new shapes come to front
         };
         upsertShapeLocal(shape);
         shapesChRef.current?.send({ type: "broadcast", event: "shape-create", payload: shape });
@@ -1019,7 +1046,7 @@ export default function CanvasViewport({ userId }: Props) {
   // ===== Double-click delete (delete all if any selected) =====
   const onDoubleClickSVG = useCallback(async (e: React.MouseEvent<SVGSVGElement>) => {
     if (drag.kind !== "none") return;
-    const hit = pickShapeEvt(e); // uses worldFromSvgEvent under the hood
+    const hit = pickShapeEvt(e);
     if (!hit) return;
     const idsToDelete = selectedIds.has(hit.id) ? Array.from(selectedIds) : [hit.id];
     const toRestore = idsToDelete.map((id) => shapesRef.current.get(id)).filter(Boolean) as Shape[];
@@ -1032,7 +1059,7 @@ export default function CanvasViewport({ userId }: Props) {
     } else {
       setSelectedIds(new Set());
     }
-  }, [drag, pickShape, selectedIds]);
+  }, [drag, pickShapeEvt, selectedIds]);
 
   // ===== COPY / CUT / PASTE =====
   const worldCursor = () => ({
@@ -1170,9 +1197,9 @@ export default function CanvasViewport({ userId }: Props) {
   const openModalForShape = useCallback(async (shapeId: string) => {
     setModalShapeId(shapeId);
     setAnnotationInput("");
-    // init sides input from clicked shape
     const s = shapesRef.current.get(shapeId);
     setSidesInput(String(resolveSides(s?.sides)));
+    setZInput(String(s?.z ?? 0)); // NEW
 
     try {
       const { data, error } = await supabase
@@ -1197,11 +1224,11 @@ export default function CanvasViewport({ userId }: Props) {
   }, []);
 
   const closeModal = useCallback(() => { setModalShapeId(null); setAnnotationInput(""); }, []);
+
   const addAnnotation = useCallback(async () => {
     const text = annotationInput.trim();
     if (!text || !modalShapeId) return;
 
-    // Target shapes: all selected (if modal shape is selected), else just the modal shape
     const targetIds = (selectedIdsRef.current.size > 0 && selectedIdsRef.current.has(modalShapeId))
       ? Array.from(selectedIdsRef.current)
       : [modalShapeId];
@@ -1217,7 +1244,6 @@ export default function CanvasViewport({ userId }: Props) {
       created_at: now,
     })) as Annotation[];
 
-    // Optimistic add to each target’s list
     setAnnotationsByShape(prev => {
       const m = new Map(prev);
       for (const ann of anns) {
@@ -1229,7 +1255,6 @@ export default function CanvasViewport({ userId }: Props) {
 
     setAnnotationInput("");
 
-    // Broadcast each (so peers update immediately)
     for (const ann of anns) {
       annotationsChRef.current?.send({
         type: "broadcast",
@@ -1238,7 +1263,6 @@ export default function CanvasViewport({ userId }: Props) {
       });
     }
 
-    // Persist (batch insert). If it fails, roll back the optimistic adds.
     const { error } = await supabase.from("shape_annotations").insert(anns as any);
     if (error) {
       console.warn("Annotation insert failed:", error.message);
@@ -1282,25 +1306,120 @@ export default function CanvasViewport({ userId }: Props) {
       if (error) console.warn("Update sides failed:", error.message);
     } catch (err) { console.warn("Update sides exception:", err); }
   }, [modalShapeId, sidesInput, selectedIds]);
-  
+
+  // NEW: save z-index (applies to selection if modal shape is selected)
+  const saveZIndex = useCallback(async () => {
+    if (!modalShapeId) return;
+    const parsed = Number(zInput.trim());
+    if (!Number.isFinite(parsed)) {
+      const cur = shapesRef.current.get(modalShapeId);
+      setZInput(String(cur?.z ?? 0));
+      return;
+    }
+    const ids = (selectedIdsRef.current.size > 0 && selectedIdsRef.current.has(modalShapeId))
+      ? Array.from(selectedIdsRef.current)
+      : [modalShapeId];
+
+    const now = nowIso();
+    setShapes(prev => {
+      const m = new Map(prev);
+      for (const id of ids) {
+        const s = m.get(id); if (!s) continue;
+        m.set(id, { ...s, z: parsed, updated_at: now });
+      }
+      return m;
+    });
+
+    shapesChRef.current?.send({ type: "broadcast", event: "shape-z", payload: { ids, z: parsed, updated_at: now } });
+
+    try {
+      const { error } = await supabase.from("shapes").update({ z: parsed, updated_at: now }).in("id", ids);
+      if (error) console.warn("Update z failed:", error.message);
+    } catch (err) {
+      console.warn("Update z exception:", err);
+    }
+  }, [modalShapeId, zInput]);
+
+  // NEW: send to front/back
+  const sendToFront = useCallback(async () => {
+    if (!modalShapeId) return;
+    const all = Array.from(shapesRef.current.values());
+    if (all.length === 0) return;
+    const maxZ = Math.max(...all.map(s => s.z ?? 0));
+    const targets = (selectedIdsRef.current.size > 0 && selectedIdsRef.current.has(modalShapeId))
+      ? Array.from(selectedIdsRef.current).map(id => shapesRef.current.get(id)!).filter(Boolean)
+      : [shapesRef.current.get(modalShapeId)!].filter(Boolean);
+    if (targets.length === 0) return;
+    const allAtTop = targets.every(s => (s.z ?? 0) >= maxZ);
+    if (allAtTop) return;
+
+    const newZ = Math.floor(maxZ) + 1;
+    const ids = targets.map(t => t.id);
+    const now = nowIso();
+
+    setShapes(prev => {
+      const m = new Map(prev);
+      for (const id of ids) {
+        const s = m.get(id); if (!s) continue;
+        m.set(id, { ...s, z: newZ, updated_at: now });
+      }
+      return m;
+    });
+    shapesChRef.current?.send({ type: "broadcast", event: "shape-z", payload: { ids, z: newZ, updated_at: now } });
+    try {
+      const { error } = await supabase.from("shapes").update({ z: newZ, updated_at: now }).in("id", ids);
+      if (error) console.warn("Send to front failed:", error.message);
+    } catch (err) { console.warn("Send to front exception:", err); }
+    if (targets.some(t => t.id === modalShapeId)) setZInput(String(newZ));
+  }, [modalShapeId]);
+
+  const sendToBack = useCallback(async () => {
+    if (!modalShapeId) return;
+    const all = Array.from(shapesRef.current.values());
+    if (all.length === 0) return;
+    const minZ = Math.min(...all.map(s => s.z ?? 0));
+    const targets = (selectedIdsRef.current.size > 0 && selectedIdsRef.current.has(modalShapeId))
+      ? Array.from(selectedIdsRef.current).map(id => shapesRef.current.get(id)!).filter(Boolean)
+      : [shapesRef.current.get(modalShapeId)!].filter(Boolean);
+    if (targets.length === 0) return;
+    const allAtBottom = targets.every(s => (s.z ?? 0) <= minZ);
+    if (allAtBottom) return;
+
+    const newZ = Math.ceil(minZ) - 1;
+    const ids = targets.map(t => t.id);
+    const now = nowIso();
+
+    setShapes(prev => {
+      const m = new Map(prev);
+      for (const id of ids) {
+        const s = m.get(id); if (!s) continue;
+        m.set(id, { ...s, z: newZ, updated_at: now });
+      }
+      return m;
+    });
+    shapesChRef.current?.send({ type: "broadcast", event: "shape-z", payload: { ids, z: newZ, updated_at: now } });
+    try {
+      const { error } = await supabase.from("shapes").update({ z: newZ, updated_at: now }).in("id", ids);
+      if (error) console.warn("Send to back failed:", error.message);
+    } catch (err) { console.warn("Send to back exception:", err); }
+    if (targets.some(t => t.id === modalShapeId)) setZInput(String(newZ));
+  }, [modalShapeId]);
+
   const updateHoverCursor = useCallback((e: React.MouseEvent<SVGSVGElement>) => {
-    // Don’t override cursor while actively dragging anything
     if (drag.kind !== "none") return;
 
     const { wx, wy } = worldFromSvgEvent(e);
-    const threshWorld = 10 / scaleRef.current; // ~10px band
-    const arr = Array.from(shapes.values());
-
+    const threshWorld = 10 / scaleRef.current;
     // Topmost-first
-    for (let i = arr.length - 1; i >= 0; i--) {
-      const s = arr[i];
+    for (let i = shapeOrdered.length - 1; i >= 0; i--) {
+      const s = shapeOrdered[i];
       if (nearPerimeter(s, wx, wy, threshWorld)) {
         setSvgCursor(cursorForPerimeter(s, wx, wy, e.metaKey || e.ctrlKey));
         return;
       }
     }
     setSvgCursor("default");
-  }, [drag.kind, shapes]);
+  }, [drag.kind, shapeOrdered, worldFromSvgEvent]);
 
   // ===== Render =====
   return (
@@ -1322,13 +1441,10 @@ export default function CanvasViewport({ userId }: Props) {
       {/* Shapes overlay (SVG) */}
       <svg
         className="absolute inset-0 w-full h-full"
-        style={{ cursor: svgCursor }}               // NEW
+        style={{ cursor: svgCursor }}
         onMouseDown={onLeftDown}
-        onMouseMove={(e) => {                       // UPDATED
-          updateHoverCursor(e);
-          onLeftMove(e);
-        }}
-        onMouseLeave={() => setSvgCursor("default")} // NEW
+        onMouseMove={(e) => { updateHoverCursor(e); onLeftMove(e); }}
+        onMouseLeave={() => setSvgCursor("default")}
         onMouseUp={onLeftUp}
         onDoubleClick={onDoubleClickSVG}
       >
@@ -1339,7 +1455,7 @@ export default function CanvasViewport({ userId }: Props) {
         </defs>
 
         <g transform={`translate(${-offset.x * scale}, ${-offset.y * scale}) scale(${scale})`}>
-          {shapeList.map((s) => {
+          {shapeOrdered.map((s) => {
             const sides = resolveSides(s.sides);
             const x = Math.min(s.x, s.x + s.width);
             const y = Math.min(s.y, s.y + s.height);
@@ -1477,7 +1593,7 @@ export default function CanvasViewport({ userId }: Props) {
                 <button className="rounded-md px-2 py-1 text-sm text-gray-600 hover:bg-gray-100" onClick={closeModal} aria-label="Close properties">✕</button>
               </div>
 
-              {/* Properties */}
+              {/* Basic Properties */}
               <div className="grid grid-cols-2 gap-3 text-sm">
                 <div><span className="text-gray-500">ID:</span> {s.id}</div>
                 <div><span className="text-gray-500">Owner:</span> {s.created_by}</div>
@@ -1490,6 +1606,50 @@ export default function CanvasViewport({ userId }: Props) {
                 <div><span className="text-gray-500">Stroke width:</span> {s.stroke_width}</div>
                 <div className="col-span-2"><span className="text-gray-500">Fill:</span> {s.fill ?? "none"}</div>
                 {s.updated_at && <div className="col-span-2"><span className="text-gray-500">Updated:</span> {new Date(s.updated_at).toLocaleString()}</div>}
+              </div>
+
+              {/* NEW: Layering (z-index) */}
+              <div className="mt-4">
+                <h3 className="mb-2 text-sm font-medium">Layering</h3>
+                <div className="flex items-end gap-3">
+                  <div className="grow">
+                    <label className="mb-1 block text-xs text-gray-600">Z-index (float, higher is on top)</label>
+                    <input
+                      type="number"
+                      step="any"
+                      className="w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm outline-none focus:border-blue-500"
+                      value={zInput}
+                      onChange={(e) => setZInput(e.target.value)}
+                    />
+                  </div>
+                  <button
+                    className="h-9 shrink-0 rounded-md bg-blue-600 px-3 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+                    onClick={saveZIndex}
+                    disabled={!Number.isFinite(Number(zInput))}
+                    title={Number.isFinite(Number(zInput)) ? "Apply to selected" : "Enter a number"}
+                  >
+                    Save
+                  </button>
+                </div>
+                <div className="mt-2 flex gap-2">
+                  <button
+                    className="rounded-md border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50"
+                    onClick={sendToFront}
+                  >
+                    Send to front
+                  </button>
+                  <button
+                    className="rounded-md border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50"
+                    onClick={sendToBack}
+                  >
+                    Send to back
+                  </button>
+                </div>
+                {selectedIds.size > 0 && selectedIds.has(modalShapeId!) && (
+                  <div className="mt-1 text-xs text-gray-500">
+                    Will apply to {selectedIds.size} selected shape{selectedIds.size > 1 ? "s" : ""}.
+                  </div>
+                )}
               </div>
 
               {/* Geometry */}

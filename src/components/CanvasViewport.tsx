@@ -1772,6 +1772,7 @@ export default function CanvasViewport({ userId }: Props) {
       {modalShapeId && (() => {
         const s = shapesRef.current.get(modalShapeId);
         const email = profiles.get(userId) ?? userId;
+        const ownerEmail = profiles.get(s.created_by) ?? s.created_by; // NEW
         const anns = annotationsByShape.get(modalShapeId) ?? [];
         if (!s) return null;
         return (
@@ -1779,14 +1780,27 @@ export default function CanvasViewport({ userId }: Props) {
             <div className="absolute inset-0 bg-black/40" onClick={closeModal} />
             <div className="relative z-10 w-[660px] max-w-[92vw] rounded-2xl bg-white p-5 shadow-xl">
               <div className="mb-3 flex items-center justify-between">
-                <h2 className="text-lg font-semibold">Shape Properties</h2>
-                <button className="rounded-md px-2 py-1 text-sm text-gray-600 hover:bg-gray-100" onClick={closeModal} aria-label="Close properties">✕</button>
+                <div>
+                  <h2 className="text-lg font-semibold">
+                    Shape Properties{ s.name ? ` — ${s.name}` : "" /* show name if present */ }
+                  </h2>
+                  {!s.name && (
+                    <div className="text-xs text-gray-500">(unnamed)</div>
+                  )}
+                </div>
+                <button
+                  className="rounded-md px-2 py-1 text-sm text-gray-600 hover:bg-gray-100"
+                  onClick={closeModal}
+                  aria-label="Close properties"
+                >
+                  ✕
+                </button>
               </div>
 
               {/* Basic */}
               <div className="grid grid-cols-2 gap-3 text-sm">
                 <div><span className="text-gray-500">ID:</span> {s.id}</div>
-                <div><span className="text-gray-500">Owner:</span> {s.created_by}</div>
+                <div><span className="text-gray-500">Owner:</span> {ownerEmail}</div> {/* CHANGED */}
                 <div><span className="text-gray-500">X:</span> {s.x}</div>
                 <div><span className="text-gray-500">Y:</span> {s.y}</div>
                 <div><span className="text-gray-500">Width:</span> {s.width}</div>

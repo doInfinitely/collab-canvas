@@ -793,8 +793,10 @@ export default function CanvasViewport({ userId }: Props) {
         const htmlContent = renderMarkdown(s.text_md);
         
         // Use foreignObject to embed HTML exactly as shown on screen
-        textEl = `<foreignObject x="${cx - boxW/2}" y="${cy - boxH/2}" width="${boxW}" height="${boxH}">
-          <div xmlns="http://www.w3.org/1999/xhtml" style="width: 100%; height: 100%; padding: 8px; overflow: auto; font-size: ${fontSize}px; color: ${textColor}; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica Neue, Arial;">
+        const transformFO = rotDeg ? ` transform="rotate(${rotDeg} ${cx} ${cy})"` : "";
+
+        textEl = `<foreignObject x="${cx - boxW/2}" y="${cy - boxH/2}" width="${boxW}" height="${boxH}"${transformFO}>
+          <div xmlns="http://www.w3.org/1999/xhtml" style="width:100%;height:100%;padding:8px;overflow:auto;font-size:${fontSize}px;color:${textColor};font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica Neue,Arial;">
             ${htmlContent}
           </div>
         </foreignObject>`;
@@ -2427,7 +2429,9 @@ export default function CanvasViewport({ userId }: Props) {
         </defs>
         <g transform={`translate(${-offset.x * scale}, ${-offset.y * scale}) scale(${scale})`}>
           {shapeOrdered.map((s) => {
-            const sides = resolveSides(s.sides);
+            // Coerce sides to a number (export can see "6" as a string)
+            const rawSides = (typeof s.sides === "number") ? s.sides : parseInt(String(s.sides ?? ""), 10);
+            const sides = resolveSides(Number.isFinite(rawSides) ? rawSides : undefined);
             const x = Math.min(s.x, s.x + s.width);
             const y = Math.min(s.y, s.y + s.height);
             const w = Math.abs(s.width);
@@ -2484,9 +2488,9 @@ export default function CanvasViewport({ userId }: Props) {
                     height={boxH}
                     transform={rotDeg ? `rotate(${rotDeg} ${cx} ${cy})` : undefined}
                     style={{ pointerEvents: "none" }} // display only; editing uses HTML overlay
+                    requiredExtensions="http://www.w3.org/1999/xhtml" // optional, OK on <foreignObject>
                   >
                     <div
-                      xmlns="http://www.w3.org/1999/xhtml"
                       style={{
                         width: "100%",
                         height: "100%",

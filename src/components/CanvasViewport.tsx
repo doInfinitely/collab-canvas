@@ -2524,9 +2524,9 @@ export default function CanvasViewport({ userId }: Props) {
       {modalShapeId && (() => {
         const s = shapesRef.current.get(modalShapeId);
         const email = profiles.get(userId) ?? userId;
+        if (!s) return null;
         const ownerEmail = profiles.get(s.created_by) ?? s.created_by; // NEW
         const anns = annotationsByShape.get(modalShapeId) ?? [];
-        if (!s) return null;
         return (
           <div className="absolute inset-0 z-50 flex items-center justify-center" aria-modal role="dialog">
             <div className="absolute inset-0 bg-black/40" onClick={closeModal} />

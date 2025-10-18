@@ -439,6 +439,16 @@ export default function CanvasViewport({ userId }: Props) {
   const [annotationInput, setAnnotationInput] = useState("");
   const [sidesInput, setSidesInput] = useState<string>("");
 
+  // Z-index input state
+  const [zIndexInput, setZIndexInput] = useState<string>("");
+
+  // Keep the input in sync when the modal opens / the shape changes
+  useEffect(() => {
+    if (!modalShapeId) return;
+    const s = shapesRef.current.get(modalShapeId);
+    setZIndexInput(s ? String(s.z ?? 0) : "0");
+  }, [modalShapeId]);
+
   // Style inputs
   const [strokeWidthInput, setStrokeWidthInput] = useState<string>("");
   const [strokeColorInput, setStrokeColorInput] = useState<string>("");
@@ -945,6 +955,9 @@ export default function CanvasViewport({ userId }: Props) {
   const [canvasVersions, setCanvasVersions] = useState<CanvasVersion[]>([]);
   const [showCanvasMenu, setShowCanvasMenu] = useState(false);
   const [canvasMenuTab, setCanvasMenuTab] = useState<'export' | 'versions'>('export');
+
+  // use to force a re-render when we only mutate refs
+  const [, forceRender] = useState(0);
 
   // Restore a version
   const restoreCanvasVersion = useCallback(async (versionId: string) => {
@@ -2238,53 +2251,156 @@ export default function CanvasViewport({ userId }: Props) {
   }, [modalShapeId, strokeWidthInput, strokeColorInput, fillColorInput, textColorInput, noFill]); // UPDATED dependencies
 
   // ===== z-index helpers/buttons =====
-  const saveZIndex = useCallback(async (zValue: number) => {
+  const saveZIndex = useCallback(async () => {
     if (!modalShapeId) return;
-    const ids = (selectedIdsRef.current.size > 0 && selectedIdsRef.current.has(modalShapeId))
-      ? Array.from(selectedIdsRef.current)
+    const v = Number(zIndexInput);
+    if (!Number.isFinite(v)) return;
+
+    // Update this shape, or all selected if current is in selection
+    const ids = (selectedIds.size > 0 && selectedIds.has(modalShapeId))
+      ? Array.from(selectedIds)
       : [modalShapeId];
-    const now = nowIso();
-    setShapes(prev => {
-      const m = new Map(prev);
-      for (const id of ids) {
-        const s = m.get(id); if (!s) continue;
-        m.set(id, { ...s, z: zValue, updated_at: now });
+
+    const now = new Date().toISOString();
+
+    // 1) Update local cache
+    for (const id of ids) {
+      const cur = shapesRef.current.get(id);
+      if (cur) {
+        shapesRef.current.set(id, { ...cur, z: v, updated_at: now });
       }
-      return m;
-    });
-    shapesChRef.current?.send({ type: "broadcast", event: "shape-z", payload: { ids, z: zValue, updated_at: now } });
-    try { await supabase.from("shapes").update({ z: zValue, updated_at: now }).in("id", ids); } catch {}
-  }, [modalShapeId]);
+    }
+
+    // 2) Force a re-render so the new z is reflected in the SVG ordering
+    forceRender(n => n + 1);
+    // (Alternate no-op that also triggers render if you prefer:)
+    // setSvgCursor(c => c);
+
+    // 3) Persist to DB
+    try {
+      await supabase.from("shapes")
+        .update({ z: v, updated_at: now })
+        .in("id", ids);
+    } catch (e) {
+      console.error("saveZIndex supabase update failed", e);
+    }
+
+    // 4) Broadcast (if you have a presence/realtime patcher)
+    try {
+      publishShapesPatch?.({
+        type: "bulk_update",
+        ids,
+        patch: { z: v, updated_at: now },
+      });
+    } catch {}
+  }, [modalShapeId, selectedIds, zIndexInput]);
+
+  // Helper: selected-or-current ids
+  const targetIdsForModal = () => {
+    if (!modalShapeId) return [] as string[];
+    return (selectedIds.size > 0 && selectedIds.has(modalShapeId))
+      ? Array.from(selectedIds)
+      : [modalShapeId];
+  };
+
+  // Helper: compute min/max z across all shapes
+  const getZBounds = () => {
+    let minZ = Infinity, maxZ = -Infinity, any = false;
+    for (const s of shapesRef.current.values()) {
+      const z = Number.isFinite(s.z as number) ? (s.z as number) : 0;
+      minZ = Math.min(minZ, z);
+      maxZ = Math.max(maxZ, z);
+      any = true;
+    }
+    if (!any) return { minZ: 0, maxZ: 0 };
+    return { minZ, maxZ };
+  };
 
   const sendToFront = useCallback(async () => {
     if (!modalShapeId) return;
-    const all = Array.from(shapesRef.current.values());
-    if (all.length === 0) return;
-    const maxZ = Math.max(...all.map(s => s.z ?? 0));
-    const targets = (selectedIdsRef.current.size > 0 && selectedIdsRef.current.has(modalShapeId))
-      ? Array.from(selectedIdsRef.current).map(id => shapesRef.current.get(id)!).filter(Boolean)
-      : [shapesRef.current.get(modalShapeId)!].filter(Boolean);
-    if (targets.length === 0) return;
-    const allAtTop = targets.every(s => (s.z ?? 0) >= maxZ);
-    if (allAtTop) return;
-    const newZ = Math.floor(maxZ) + 1;
-    await saveZIndex(newZ);
-  }, [modalShapeId, saveZIndex]);
+    const ids = targetIdsForModal();
+    const { maxZ } = getZBounds();
+    const now = new Date().toISOString();
+
+    // bump each to top, preserving relative order among the selected
+    let zCursor = maxZ + 1;
+    for (const id of ids) {
+      const cur = shapesRef.current.get(id);
+      if (cur) {
+        shapesRef.current.set(id, { ...cur, z: zCursor++, updated_at: now });
+      }
+    }
+
+    // re-render
+    forceRender(n => n + 1);
+
+    // persist
+    try {
+      await supabase.from("shapes")
+        .update({ updated_at: now }) // z differs per id, so do per-id updates
+        .in("id", ids.map(String));
+      // do individual updates w/ z values
+      for (const id of ids) {
+        const cur = shapesRef.current.get(id);
+        if (cur) {
+          await supabase.from("shapes").update({ z: cur.z, updated_at: now }).eq("id", id);
+        }
+      }
+    } catch (e) {
+      console.error("sendToFront supabase update failed", e);
+    }
+
+    // broadcast (optional)
+    try {
+      publishShapesPatch?.({
+        type: "bulk_update",
+        ids,
+        // not all the same z; listeners will diff via follow-up fetch or full patch per id
+        patch: { updated_at: now },
+      });
+    } catch {}
+  }, [modalShapeId, selectedIds]);
 
   const sendToBack = useCallback(async () => {
     if (!modalShapeId) return;
-    const all = Array.from(shapesRef.current.values());
-    if (all.length === 0) return;
-    const minZ = Math.min(...all.map(s => s.z ?? 0));
-    const targets = (selectedIdsRef.current.size > 0 && selectedIdsRef.current.has(modalShapeId))
-      ? Array.from(selectedIdsRef.current).map(id => shapesRef.current.get(id)!).filter(Boolean)
-      : [shapesRef.current.get(modalShapeId)!].filter(Boolean);
-    if (targets.length === 0) return;
-    const allAtBottom = targets.every(s => (s.z ?? 0) <= minZ);
-    if (allAtBottom) return;
-    const newZ = Math.ceil(minZ) - 1;
-    await saveZIndex(newZ);
-  }, [modalShapeId, saveZIndex]);
+    const ids = targetIdsForModal();
+    const { minZ } = getZBounds();
+    const now = new Date().toISOString();
+
+    // push to bottom, preserving relative order among the selected
+    // we assign descending z's below minZ so their order is kept
+    let zCursor = minZ - ids.length;
+    for (const id of ids) {
+      const cur = shapesRef.current.get(id);
+      if (cur) {
+        shapesRef.current.set(id, { ...cur, z: zCursor++, updated_at: now });
+      }
+    }
+
+    // re-render
+    forceRender(n => n + 1);
+
+    // persist
+    try {
+      for (const id of ids) {
+        const cur = shapesRef.current.get(id);
+        if (cur) {
+          await supabase.from("shapes").update({ z: cur.z, updated_at: now }).eq("id", id);
+        }
+      }
+    } catch (e) {
+      console.error("sendToBack supabase update failed", e);
+    }
+
+    // broadcast (optional)
+    try {
+      publishShapesPatch?.({
+        type: "bulk_update",
+        ids,
+        patch: { updated_at: now },
+      });
+    } catch {}
+  }, [modalShapeId, selectedIds]);
 
   // ===== hover cursor =====
   const updateHoverCursor = useCallback((e: React.MouseEvent<SVGSVGElement>) => {
@@ -2352,7 +2468,6 @@ export default function CanvasViewport({ userId }: Props) {
             <feDropShadow dx="0" dy="0" stdDeviation="3" floodColor="#3b82f6" floodOpacity="0.9" />
           </filter>
         </defs>
-
         <g transform={`translate(${-offset.x * scale}, ${-offset.y * scale}) scale(${scale})`}>
           {shapeOrdered.map((s) => {
             const sides = resolveSides(s.sides);
@@ -2364,7 +2479,7 @@ export default function CanvasViewport({ userId }: Props) {
             const rotDeg = deg(s.rotation ?? 0);
             const { cx, cy } = shapeCenter(s);
 
-            const commonProps = {
+            const shapeProps = {
               fill: s.fill ?? "transparent",
               stroke: s.stroke,
               strokeWidth: strokeW,
@@ -2372,16 +2487,65 @@ export default function CanvasViewport({ userId }: Props) {
               style: { cursor: "inherit" },
               filter: selectedIds.has(s.id) ? "url(#selGlow)" : undefined,
               transform: rotDeg ? `rotate(${rotDeg} ${cx} ${cy})` : undefined,
-              onContextMenu: (e: React.MouseEvent) => { e.preventDefault(); e.stopPropagation(); openModalForShape(s.id); }
             };
 
+            const isEditing = editingTextId === s.id;
+
+            // ---- text_md-in-SVG (foreignObject) setup ----
+            const hasMD = !!(s.text_md && s.text_md.trim());
+            const { boxW, boxH } = getTextBoxBounds(s); // your existing helper
+            const boxX = cx - boxW / 2;                 // world coords
+            const boxY = cy - boxH / 2;                 // world coords
+            const foFontSize = Math.max(10, 14 / scale); // screen-stable sizing
+            const textColor =
+              s.text_color && HEX_RE.test(s.text_color) ? s.text_color : "#000000";
+
+            let node: React.ReactNode;
             if (sides === 4) {
-              return <rect key={s.id} x={x} y={y} width={w} height={h} {...commonProps} />;
+              node = <rect x={x} y={y} width={w} height={h} {...shapeProps} />;
+            } else if (sides === 0) {
+              node = <ellipse cx={x + w / 2} cy={y + h / 2} rx={w / 2} ry={h / 2} {...shapeProps} />;
+            } else {
+              node = <polygon points={polygonPoints(x, y, w, h, sides)} {...shapeProps} />;
             }
-            if (sides === 0) {
-              return <ellipse key={s.id} cx={x + w / 2} cy={y + h / 2} rx={w / 2} ry={h / 2} {...commonProps} />;
-            }
-            return <polygon key={s.id} points={polygonPoints(x, y, w, h, sides)} {...commonProps} />;
+
+            return (
+              <g
+                key={s.id}
+                data-shape-id={s.id}
+                onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); openModalForShape(s.id); }}
+              >
+                {/* shape path */}
+                {node}
+
+                {/* text_md rendered inside the same group so it shares z-index */}
+                {hasMD && !isEditing && (
+                  <foreignObject
+                    x={boxX}
+                    y={boxY}
+                    width={boxW}
+                    height={boxH}
+                    transform={rotDeg ? `rotate(${rotDeg} ${cx} ${cy})` : undefined}
+                    style={{ pointerEvents: "none" }} // display only; editing uses HTML overlay
+                  >
+                    <div
+                      xmlns="http://www.w3.org/1999/xhtml"
+                      style={{
+                        width: "100%",
+                        height: "100%",
+                        overflow: "hidden", // clip to box; switch to 'auto' if you want scrollbars
+                        color: textColor,
+                        fontSize: `${foFontSize}px`,
+                        lineHeight: "1.25",
+                        fontFamily:
+                          "ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica Neue, Arial",
+                      }}
+                      dangerouslySetInnerHTML={{ __html: renderMarkdown(s.text_md!) }}
+                    />
+                  </foreignObject>
+                )}
+              </g>
+            );
           })}
 
           {drag.kind === "creating" && (
@@ -2398,7 +2562,6 @@ export default function CanvasViewport({ userId }: Props) {
             />
           )}
         </g>
-
         {/* Marquee (screen coords) */}
         {marquee && (() => {
           const minX = Math.min(marquee.startX, marquee.curX);
@@ -2421,58 +2584,45 @@ export default function CanvasViewport({ userId }: Props) {
           );
         })()}
       </svg>
-      {/* Text boxes overlay */}
-      <div className="absolute inset-0 pointer-events-none">
+      {/* Text boxes overlay (editing only) */}
+      <div className="absolute inset-0 pointer-events-none z-20">
         {shapeOrdered.map((s) => {
+          const isEditing = editingTextId === s.id;
+          if (!isEditing) return null;
+
           const { cx, cy } = shapeCenter(s);
           const { boxW, boxH } = getTextBoxBounds(s);
-          
+
           const screenX = (cx - offset.x) * scale;
           const screenY = (cy - offset.y) * scale;
           const screenW = boxW * scale;
           const screenH = boxH * scale;
-          
-          const isEditing = editingTextId === s.id;
-          
+
+          const zForEditor = 1000 + (Number.isFinite(s.z as number) ? (s.z as number) : 0);
+
           return (
             <div
-              key={`text-${s.id}`}
+              key={`text-editor-${s.id}`}
               className="absolute"
               style={{
                 left: screenX - screenW / 2,
                 top: screenY - screenH / 2,
                 width: screenW,
                 height: screenH,
-                pointerEvents: isEditing ? 'auto' : 'none', // Only capture events when editing
+                pointerEvents: "auto",
+                zIndex: zForEditor,
               }}
+              onClick={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
             >
-              {isEditing ? (
-                <textarea
-                  className="w-full h-full p-2 text-sm border-2 border-blue-500 rounded bg-white resize-none outline-none"
-                  style={{ fontSize: Math.max(10, 14 * scale) }}
-                  value={editingText}
-                  onChange={(e) => handleTextChange(e.target.value)}
-                  onBlur={handleTextBlur}
-                  autoFocus
-                  onClick={(e) => e.stopPropagation()}
-                  onMouseDown={(e) => e.stopPropagation()}
-                />
-                ) : (
-                  <div
-                    className="w-full h-full p-2 overflow-auto rounded"
-                    style={{ 
-                      fontSize: Math.max(10, 14 * scale),
-                      pointerEvents: 'none',
-                      color: s.text_color && HEX_RE.test(s.text_color) ? s.text_color : '#000000', // UPDATED with validation
-                    }}
-                  >
-                    {s.text_md ? (
-                      <div dangerouslySetInnerHTML={{ __html: renderMarkdown(s.text_md) }} />
-                    ) : (
-                      <div className="text-gray-400 text-xs opacity-50">Click to add text</div>
-                    )}
-                  </div>
-                )}
+              <textarea
+                className="w-full h-full p-2 text-sm border-2 border-blue-500 rounded bg-white resize-none outline-none"
+                style={{ fontSize: Math.max(10, 14 * scale) }}
+                value={editingText}
+                onChange={(e) => handleTextChange(e.target.value)}
+                onBlur={handleTextBlur}
+                autoFocus
+              />
             </div>
           );
         })}
@@ -2564,10 +2714,59 @@ export default function CanvasViewport({ userId }: Props) {
               {/* Layering */}
               <div className="mt-4">
                 <h3 className="mb-2 text-sm font-medium">Layering</h3>
-                <div className="flex gap-2">
-                  <button className="rounded-md border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50" onClick={sendToFront}>Send to front</button>
-                  <button className="rounded-md border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50" onClick={sendToBack}>Send to back</button>
+                <div className="flex flex-wrap items-end gap-3">
+                  <div className="flex gap-2">
+                    <button
+                      className="rounded-md border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50"
+                      onClick={sendToFront}
+                    >
+                      Send to front
+                    </button>
+                    <button
+                      className="rounded-md border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50"
+                      onClick={sendToBack}
+                    >
+                      Send to back
+                    </button>
+                  </div>
+
+                  {/* exact z-index setter */}
+                  <div className="ml-auto flex items-end gap-2">
+                    <div>
+                      <label className="mb-1 block text-xs text-gray-600">Z-index (integer)</label>
+                      <input
+                        type="number"
+                        step={1}
+                        className="w-28 rounded-md border border-gray-300 px-2 py-1.5 text-sm outline-none focus:border-blue-500"
+                        value={zIndexInput}
+                        onChange={(e) => setZIndexInput(e.target.value)}
+                        onBlur={(e) => {
+                          // sanitize to integer on blur
+                          const n = Math.round(Number(e.target.value));
+                          if (Number.isFinite(n)) setZIndexInput(String(n));
+                        }}
+                      />
+                    </div>
+                    <button
+                      className="h-9 shrink-0 rounded-md bg-blue-600 px-3 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+                      onClick={saveZIndex}
+                      disabled={!Number.isFinite(Number(zIndexInput))}
+                      title={
+                        selectedIds.size > 0 && selectedIds.has(modalShapeId!)
+                          ? `Apply to ${selectedIds.size} selected`
+                          : "Apply to this shape"
+                      }
+                    >
+                      Set Z
+                    </button>
+                  </div>
                 </div>
+
+                {selectedIds.size > 0 && selectedIds.has(modalShapeId!) && (
+                  <div className="mt-1 text-xs text-gray-500">
+                    Applies to {selectedIds.size} selected shape{selectedIds.size > 1 ? "s" : ""}.
+                  </div>
+                )}
               </div>
 
               {/* Geometry */}

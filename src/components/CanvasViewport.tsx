@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase/client";
 import Portal from "@/components/Portal";
+import ChatBox from "@/components/ChatBox";
 
 type Props = { userId: string };
 
@@ -1158,6 +1159,62 @@ export default function CanvasViewport({ userId }: Props) {
     }
     schedulePublish();
   };
+
+  // ===== AI Pan to Coordinate =====
+  const panToCoordinate = useCallback((targetX: number, targetY: number) => {
+    const svg = svgRef.current;
+    if (!svg) return;
+
+    const rect = svg.getBoundingClientRect();
+    const viewportCenterX = rect.width / 2;
+    const viewportCenterY = rect.height / 2;
+
+    // Current center in world coordinates
+    const currentCenterX = offsetRef.current.x + viewportCenterX / scaleRef.current;
+    const currentCenterY = offsetRef.current.y + viewportCenterY / scaleRef.current;
+
+    // Calculate distance
+    const dx = targetX - currentCenterX;
+    const dy = targetY - currentCenterY;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+
+    // Target offset to center on the coordinate
+    const targetOffsetX = targetX - viewportCenterX / scaleRef.current;
+    const targetOffsetY = targetY - viewportCenterY / scaleRef.current;
+
+    // If distance is large (> 2000px), instant jump
+    if (distance > 2000) {
+      setOffset({ x: targetOffsetX, y: targetOffsetY });
+      schedulePublish();
+      return;
+    }
+
+    // Otherwise, smooth animation
+    const startOffset = { ...offsetRef.current };
+    const startTime = Date.now();
+    const duration = 600; // 600ms animation
+
+    const animate = () => {
+      const elapsed = Date.now() - startTime;
+      const progress = Math.min(elapsed / duration, 1);
+      
+      // Ease out cubic
+      const easeProgress = 1 - Math.pow(1 - progress, 3);
+
+      const currentX = startOffset.x + (targetOffsetX - startOffset.x) * easeProgress;
+      const currentY = startOffset.y + (targetOffsetY - startOffset.y) * easeProgress;
+
+      setOffset({ x: currentX, y: currentY });
+
+      if (progress < 1) {
+        requestAnimationFrame(animate);
+      } else {
+        schedulePublish();
+      }
+    };
+
+    requestAnimationFrame(animate);
+  }, [schedulePublish]);
 
   const onMouseUpRoot = () => { panningRef.current = false; };  
   const onContextMenuRoot = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -3161,6 +3218,19 @@ export default function CanvasViewport({ userId }: Props) {
           </div>
         </Portal>
       )}
+      {/* AI ChatBox */}
+      <Portal>
+        <ChatBox
+          onPanToCoordinate={panToCoordinate}
+          canvasState={{
+            centerX: offset.x + (svgRef.current?.getBoundingClientRect().width ?? 0) / 2 / scale,
+            centerY: offset.y + (svgRef.current?.getBoundingClientRect().height ?? 0) / 2 / scale,
+            scale,
+            viewportWidth: svgRef.current?.getBoundingClientRect().width ?? 0,
+            viewportHeight: svgRef.current?.getBoundingClientRect().height ?? 0,
+          }}
+        />
+      </Portal>
     </div>
   );
 }

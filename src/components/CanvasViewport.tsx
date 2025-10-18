@@ -233,13 +233,150 @@ const renderMarkdown = (text: string) => {
   return html;
 };
 
+// Replace the simple getTextBoxBounds with this comprehensive version
 const getTextBoxBounds = (s: Shape) => {
+  const sides = resolveSides(s.sides);
+  const { cx, cy } = shapeCenter(s);
+  const theta = s.rotation ?? 0;
   const rx = Math.abs(s.width) / 2;
   const ry = Math.abs(s.height) / 2;
-  const factor = 0.7;
-  const boxW = rx * 2 * factor;
-  const boxH = ry * 2 * factor;
-  return { boxW, boxH };
+
+  // For unrotated shapes, use the simple calculation
+  if (Math.abs(theta) < 0.001) {
+    const factor = 0.7;
+    return { boxW: rx * 2 * factor, boxH: ry * 2 * factor };
+  }
+
+  // For rotated shapes, we need to find the largest axis-aligned rectangle
+  // that fits inside the rotated shape
+
+  // Get the shape's boundary points in world coordinates
+  const getBoundaryPoints = (): Array<[number, number]> => {
+    const points: Array<[number, number]> = [];
+    const numPoints = sides === 0 ? 64 : sides; // Use 64 points for ellipse approximation
+    const startAngle = -Math.PI / 2;
+
+    for (let i = 0; i < numPoints; i++) {
+      const angle = startAngle + (i * 2 * Math.PI) / numPoints;
+      // Local coordinates
+      const lx = rx * Math.cos(angle);
+      const ly = ry * Math.sin(angle);
+      
+      // Rotate to world coordinates
+      const c = Math.cos(theta);
+      const s = Math.sin(theta);
+      const wx = cx + (lx * c - ly * s);
+      const wy = cy + (lx * s + ly * c);
+      
+      points.push([wx, wy]);
+    }
+    return points;
+  };
+
+  const boundaryPoints = getBoundaryPoints();
+
+  // Find the axis-aligned bounding box of all boundary points
+  let minX = Infinity, maxX = -Infinity;
+  let minY = Infinity, maxY = -Infinity;
+  for (const [x, y] of boundaryPoints) {
+    minX = Math.min(minX, x);
+    maxX = Math.max(maxX, x);
+    minY = Math.min(minY, y);
+    maxY = Math.max(maxY, y);
+  }
+
+  // Check if a point is inside the shape (in world coordinates)
+  const isInsideShape = (wx: number, wy: number): boolean => {
+    // Transform to local coordinates
+    const dx = wx - cx;
+    const dy = wy - cy;
+    const c = Math.cos(-theta);
+    const si = Math.sin(-theta);
+    const lx = dx * c - dy * si;
+    const ly = dx * si + dy * c;
+
+    if (sides === 4) {
+      return Math.abs(lx) <= rx && Math.abs(ly) <= ry;
+    }
+    if (sides === 0) {
+      return (lx * lx) / (rx * rx) + (ly * ly) / (ry * ry) <= 1;
+    }
+
+    // Polygon: use ray casting
+    const pts: Array<[number, number]> = [];
+    const start = -Math.PI / 2;
+    for (let i = 0; i < sides; i++) {
+      const ang = start + (i * 2 * Math.PI) / sides;
+      pts.push([rx * Math.cos(ang), ry * Math.sin(ang)]);
+    }
+    
+    let inside = false;
+    for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+      const [xi, yi] = pts[i];
+      const [xj, yj] = pts[j];
+      const intersect = yi > ly !== yj > ly && lx < ((xj - xi) * (ly - yi)) / (yj - yi) + xi;
+      if (intersect) inside = !inside;
+    }
+    return inside;
+  };
+
+  // Binary search to find the largest rectangle centered at cx, cy
+  // that fits inside the shape
+  const findMaxRectangle = (): { boxW: number; boxH: number } => {
+    const maxW = maxX - minX;
+    const maxH = maxY - minY;
+
+    // Binary search for width
+    let wLow = 0, wHigh = maxW;
+    for (let iter = 0; iter < 20; iter++) {
+      const testW = (wLow + wHigh) / 2;
+      const testH = maxH * (testW / maxW); // Maintain aspect ratio loosely
+      
+      // Check if rectangle with this width fits
+      const corners = [
+        [cx - testW / 2, cy - testH / 2],
+        [cx + testW / 2, cy - testH / 2],
+        [cx - testW / 2, cy + testH / 2],
+        [cx + testW / 2, cy + testH / 2],
+      ];
+      
+      const allInside = corners.every(([x, y]) => isInsideShape(x, y));
+      
+      if (allInside) {
+        wLow = testW;
+      } else {
+        wHigh = testW;
+      }
+    }
+
+    // Binary search for height with the found width
+    const finalW = wLow * 0.95; // Use 95% of max for safety margin
+    let hLow = 0, hHigh = maxH;
+    for (let iter = 0; iter < 20; iter++) {
+      const testH = (hLow + hHigh) / 2;
+      
+      const corners = [
+        [cx - finalW / 2, cy - testH / 2],
+        [cx + finalW / 2, cy - testH / 2],
+        [cx - finalW / 2, cy + testH / 2],
+        [cx + finalW / 2, cy + testH / 2],
+      ];
+      
+      const allInside = corners.every(([x, y]) => isInsideShape(x, y));
+      
+      if (allInside) {
+        hLow = testH;
+      } else {
+        hHigh = testH;
+      }
+    }
+
+    const finalH = hLow * 0.95; // Use 95% of max for safety margin
+    
+    return { boxW: Math.max(20, finalW), boxH: Math.max(20, finalH) };
+  };
+
+  return findMaxRectangle();
 };
 
 const pointInTextBox = (s: Shape, wx: number, wy: number) => {

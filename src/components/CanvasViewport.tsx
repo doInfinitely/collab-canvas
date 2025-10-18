@@ -1243,6 +1243,20 @@ export default function CanvasViewport({ userId }: Props) {
     requestAnimationFrame(animate);
   }, [schedulePublish]);
 
+  // ===== AI Helper Functions =====
+  const getSelectedShapeIds = useCallback(() => {
+    return Array.from(selectedIds);
+  }, [selectedIds]);
+
+  const getUserCursors = useCallback(() => {
+    return Array.from(remoteCursors.entries()).map(([uid, cursor]) => ({
+      userId: uid,
+      email: profiles.get(uid) ?? uid,
+      worldX: cursor.worldX,
+      worldY: cursor.worldY,
+    }));
+  }, [remoteCursors, profiles]);
+
   const onMouseUpRoot = (e: React.MouseEvent<HTMLDivElement>) => { 
     // Handle right mouse button up
     if (e.button === 2) {
@@ -3270,6 +3284,9 @@ export default function CanvasViewport({ userId }: Props) {
             viewportWidth: svgRef.current?.getBoundingClientRect().width ?? 0,
             viewportHeight: svgRef.current?.getBoundingClientRect().height ?? 0,
           }}
+          getCanvasJSON={encodeCanvasToJSON}
+          getSelectedShapeIds={getSelectedShapeIds}
+          getUserCursors={getUserCursors}
         />
       </Portal>
     </div>

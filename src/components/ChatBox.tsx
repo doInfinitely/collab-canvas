@@ -24,9 +24,18 @@ type ChatBoxProps = {
     viewportWidth: number;
     viewportHeight: number;
   };
+  getCanvasJSON: () => string;
+  getSelectedShapeIds: () => string[];
+  getUserCursors: () => Array<{ userId: string; email: string; worldX: number; worldY: number }>;
 };
 
-export default function ChatBox({ onPanToCoordinate, canvasState }: ChatBoxProps) {
+export default function ChatBox({ 
+  onPanToCoordinate, 
+  canvasState, 
+  getCanvasJSON,
+  getSelectedShapeIds,
+  getUserCursors,
+}: ChatBoxProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState("");
@@ -69,6 +78,9 @@ export default function ChatBox({ onPanToCoordinate, canvasState }: ChatBoxProps
         body: JSON.stringify({
           message: inputValue,
           canvasState,
+          canvasJSON: getCanvasJSON(),
+          selectedShapeIds: getSelectedShapeIds(),
+          userCursors: getUserCursors(),
         }),
       });
 
@@ -84,18 +96,21 @@ export default function ChatBox({ onPanToCoordinate, canvasState }: ChatBoxProps
           if (call.name === "panToCoordinate") {
             onPanToCoordinate(call.arguments.x, call.arguments.y);
           }
+          // For read-only functions, the data is already included in call.data
+          // The AI will format and present this information in its response
         }
       }
 
       // Add assistant response
-      const assistantMessage: Message = {
-        id: crypto.randomUUID(),
-        role: "assistant",
-        content: data.message || "Done!",
-        timestamp: new Date(),
-      };
-
-      setMessages((prev) => [...prev, assistantMessage]);
+      if (data.message) {
+        const assistantMessage: Message = {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: data.message,
+          timestamp: new Date(),
+        };
+        setMessages((prev) => [...prev, assistantMessage]);
+      }
     } catch (error) {
       console.error("Error sending message:", error);
       const errorMessage: Message = {
@@ -193,8 +208,9 @@ export default function ChatBox({ onPanToCoordinate, canvasState }: ChatBoxProps
             <p>Try asking me to:</p>
             <ul className="mt-2 text-left inline-block">
               <li>• "Pan to coordinates 500, 300"</li>
-              <li>• "Center the view on 0, 0"</li>
-              <li>• "Move to position -1000, 2000"</li>
+              <li>• "What shapes are on the canvas?"</li>
+              <li>• "What do I have selected?"</li>
+              <li>• "Where are other users?"</li>
             </ul>
           </div>
         )}

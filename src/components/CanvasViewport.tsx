@@ -2251,48 +2251,54 @@ export default function CanvasViewport({ userId }: Props) {
   }, [modalShapeId, strokeWidthInput, strokeColorInput, fillColorInput, textColorInput, noFill]); // UPDATED dependencies
 
   // ===== z-index helpers/buttons =====
-  const saveZIndex = useCallback(async () => {
+  // helper to update z for a set of ids to specific values (per-id)
+  function updateZIndexed(ids: string[], zById: Record<string, number>) {
+    const now = new Date().toISOString();
+
+    // Update React state (new Map -> re-render), and mirror to ref
+    setShapes(prev => {
+      const next = new Map(prev);
+      for (const id of ids) {
+        const cur = next.get(id);
+        if (cur) {
+          const updated = { ...cur, z: zById[id], updated_at: now };
+          next.set(id, updated);
+          shapesRef.current.set(id, updated);
+        }
+      }
+      return next;
+    });
+
+    // Persist to DB (best-effort)
+    (async () => {
+      try {
+        for (const id of ids) {
+          const cur = shapesRef.current.get(id);
+          if (cur) {
+            await supabase.from("shapes")
+              .update({ z: cur.z, updated_at: cur.updated_at })
+              .eq("id", id);
+          }
+        }
+      } catch (e) {
+        console.error("z-index update failed", e);
+      }
+    })();
+  }
+
+  const saveZIndex = useCallback(() => {
     if (!modalShapeId) return;
     const v = Number(zIndexInput);
     if (!Number.isFinite(v)) return;
 
-    // Update this shape, or all selected if current is in selection
     const ids = (selectedIds.size > 0 && selectedIds.has(modalShapeId))
       ? Array.from(selectedIds)
       : [modalShapeId];
 
-    const now = new Date().toISOString();
+    const zById: Record<string, number> = {};
+    for (const id of ids) zById[id] = v;
 
-    // 1) Update local cache
-    for (const id of ids) {
-      const cur = shapesRef.current.get(id);
-      if (cur) {
-        shapesRef.current.set(id, { ...cur, z: v, updated_at: now });
-      }
-    }
-
-    // 2) Force a re-render so the new z is reflected in the SVG ordering
-    forceRender(n => n + 1);
-    // (Alternate no-op that also triggers render if you prefer:)
-    // setSvgCursor(c => c);
-
-    // 3) Persist to DB
-    try {
-      await supabase.from("shapes")
-        .update({ z: v, updated_at: now })
-        .in("id", ids);
-    } catch (e) {
-      console.error("saveZIndex supabase update failed", e);
-    }
-
-    // 4) Broadcast (if you have a presence/realtime patcher)
-    try {
-      publishShapesPatch?.({
-        type: "bulk_update",
-        ids,
-        patch: { z: v, updated_at: now },
-      });
-    } catch {}
+    updateZIndexed(ids, zById);
   }, [modalShapeId, selectedIds, zIndexInput]);
 
   // Helper: selected-or-current ids
@@ -2316,91 +2322,42 @@ export default function CanvasViewport({ userId }: Props) {
     return { minZ, maxZ };
   };
 
-  const sendToFront = useCallback(async () => {
-    if (!modalShapeId) return;
-    const ids = targetIdsForModal();
-    const { maxZ } = getZBounds();
-    const now = new Date().toISOString();
+  const sendToFront = useCallback(() => {
+    // find current maxZ
+    let maxZ = 0;
+    for (const s of shapes.values()) maxZ = Math.max(maxZ, s.z ?? 0);
 
-    // bump each to top, preserving relative order among the selected
-    let zCursor = maxZ + 1;
-    for (const id of ids) {
-      const cur = shapesRef.current.get(id);
-      if (cur) {
-        shapesRef.current.set(id, { ...cur, z: zCursor++, updated_at: now });
-      }
+    const ids = (selectedIds.size > 0 && modalShapeId && selectedIds.has(modalShapeId))
+      ? Array.from(selectedIds)
+      : (modalShapeId ? [modalShapeId] : []);
+
+    let z = maxZ + 1;
+    const zById: Record<string, number> = {};
+    for (const id of ids) zById[id] = z++;
+
+    updateZIndexed(ids, zById);
+  }, [shapes, selectedIds, modalShapeId]);
+
+  const sendToBack = useCallback(() => {
+    // find current minZ
+    let minZ = 0;
+    let first = true;
+    for (const s of shapes.values()) {
+      const z = s.z ?? 0;
+      if (first) { minZ = z; first = false; } else { minZ = Math.max(Math.min(minZ, z), Math.min(minZ, z)); minZ = Math.min(minZ, z); }
     }
 
-    // re-render
-    forceRender(n => n + 1);
+    const ids = (selectedIds.size > 0 && modalShapeId && selectedIds.has(modalShapeId))
+      ? Array.from(selectedIds)
+      : (modalShapeId ? [modalShapeId] : []);
 
-    // persist
-    try {
-      await supabase.from("shapes")
-        .update({ updated_at: now }) // z differs per id, so do per-id updates
-        .in("id", ids.map(String));
-      // do individual updates w/ z values
-      for (const id of ids) {
-        const cur = shapesRef.current.get(id);
-        if (cur) {
-          await supabase.from("shapes").update({ z: cur.z, updated_at: now }).eq("id", id);
-        }
-      }
-    } catch (e) {
-      console.error("sendToFront supabase update failed", e);
-    }
+    // preserve relative order: assign consecutive z’s below minZ
+    let z = minZ - ids.length;
+    const zById: Record<string, number> = {};
+    for (const id of ids) zById[id] = z++;
 
-    // broadcast (optional)
-    try {
-      publishShapesPatch?.({
-        type: "bulk_update",
-        ids,
-        // not all the same z; listeners will diff via follow-up fetch or full patch per id
-        patch: { updated_at: now },
-      });
-    } catch {}
-  }, [modalShapeId, selectedIds]);
-
-  const sendToBack = useCallback(async () => {
-    if (!modalShapeId) return;
-    const ids = targetIdsForModal();
-    const { minZ } = getZBounds();
-    const now = new Date().toISOString();
-
-    // push to bottom, preserving relative order among the selected
-    // we assign descending z's below minZ so their order is kept
-    let zCursor = minZ - ids.length;
-    for (const id of ids) {
-      const cur = shapesRef.current.get(id);
-      if (cur) {
-        shapesRef.current.set(id, { ...cur, z: zCursor++, updated_at: now });
-      }
-    }
-
-    // re-render
-    forceRender(n => n + 1);
-
-    // persist
-    try {
-      for (const id of ids) {
-        const cur = shapesRef.current.get(id);
-        if (cur) {
-          await supabase.from("shapes").update({ z: cur.z, updated_at: now }).eq("id", id);
-        }
-      }
-    } catch (e) {
-      console.error("sendToBack supabase update failed", e);
-    }
-
-    // broadcast (optional)
-    try {
-      publishShapesPatch?.({
-        type: "bulk_update",
-        ids,
-        patch: { updated_at: now },
-      });
-    } catch {}
-  }, [modalShapeId, selectedIds]);
+    updateZIndexed(ids, zById);
+  }, [shapes, selectedIds, modalShapeId]);
 
   // ===== hover cursor =====
   const updateHoverCursor = useCallback((e: React.MouseEvent<SVGSVGElement>) => {

@@ -1114,16 +1114,30 @@ export default function CanvasViewport({ userId }: Props) {
   // --- Panning (root) ---
   const panningRef = useRef(false);
   const lastRef = useRef({ x: 0, y: 0 });
-  const panDidMoveRef = useRef(false); // NEW - track if panning actually moved
+  const panStartRef = useRef({ x: 0, y: 0 }); // Track start position
+  const panDidMoveRef = useRef(false); // Track if panning actually moved
+  const panCommittedRef = useRef(false); // Track if we've committed to panning
+  const panTimerRef = useRef<number | null>(null); // Timer for delay
 
   const onMouseDownRoot = (e: React.MouseEvent<HTMLDivElement>) => {
     if (e.button !== 2) return;
     panningRef.current = true;
-    panDidMoveRef.current = false; // Reset the flag
+    panDidMoveRef.current = false;
+    panCommittedRef.current = false;
+    panStartRef.current = { x: e.clientX, y: e.clientY };
     lastRef.current = { x: e.clientX, y: e.clientY };
+    
+    // Set a timer - if still holding after 250ms, commit to panning
+    panTimerRef.current = window.setTimeout(() => {
+      if (panningRef.current) {
+        panCommittedRef.current = true;
+        // Close modal if open
+        setShowCanvasMenu(false);
+      }
+    }, 250);
   };
 
-  const PAN_THRESHOLD = 2; // pixels in screen space
+  const PAN_THRESHOLD = 5; // pixels in screen space
 
   const onMouseMoveRoot = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!panningRef.current) return;
@@ -1131,13 +1145,26 @@ export default function CanvasViewport({ userId }: Props) {
     const dxScr = e.clientX - lastRef.current.x;
     const dyScr = e.clientY - lastRef.current.y;
 
-    if (Math.abs(dxScr) >= PAN_THRESHOLD || Math.abs(dyScr) >= PAN_THRESHOLD) {
+    // Check total distance from start
+    const totalDx = e.clientX - panStartRef.current.x;
+    const totalDy = e.clientY - panStartRef.current.y;
+    const totalDist = Math.sqrt(totalDx * totalDx + totalDy * totalDy);
+
+    // If we've moved beyond threshold, commit to panning
+    if (!panCommittedRef.current && totalDist >= PAN_THRESHOLD) {
+      panCommittedRef.current = true;
       panDidMoveRef.current = true;
+      // Close modal if open
+      setShowCanvasMenu(false);
     }
 
-    lastRef.current = { x: e.clientX, y: e.clientY };
-    setOffset(o => ({ x: o.x + dxScr / s, y: o.y + dyScr / s }));
-    schedulePublish();
+    // Only actually pan if we've committed
+    if (panCommittedRef.current) {
+      panDidMoveRef.current = true;
+      lastRef.current = { x: e.clientX, y: e.clientY };
+      setOffset(o => ({ x: o.x + dxScr / s, y: o.y + dyScr / s }));
+      schedulePublish();
+    }
   };
 
   const onWheel = (e: React.WheelEvent<HTMLDivElement>) => {
@@ -1216,20 +1243,34 @@ export default function CanvasViewport({ userId }: Props) {
     requestAnimationFrame(animate);
   }, [schedulePublish]);
 
-  const onMouseUpRoot = () => { panningRef.current = false; };  
-  const onContextMenuRoot = (e: React.MouseEvent<HTMLDivElement>) => {
-    e.preventDefault();
+  const onMouseUpRoot = (e: React.MouseEvent<HTMLDivElement>) => { 
+    // Handle right mouse button up
+    if (e.button === 2) {
+      // Clear the timer if it's still running
+      if (panTimerRef.current !== null) {
+        clearTimeout(panTimerRef.current);
+        panTimerRef.current = null;
+      }
 
-    // Only consider showing menu if we didn't pan
-    if (!panDidMoveRef.current && isBackgroundRightClick(e)) {
-      setCanvasMenuPos({ x: e.clientX, y: e.clientY });
-      setCanvasMenuTab('export');   // default tab
-      setShowCanvasMenu(true);
+      // Only show canvas menu if we didn't commit to panning or move
+      if (!panCommittedRef.current && !panDidMoveRef.current && isBackgroundRightClick(e)) {
+        setCanvasMenuPos({ x: e.clientX, y: e.clientY });
+        setCanvasMenuTab('export');   // default tab
+        setShowCanvasMenu(true);
+      }
+
+      // Reset pan flags
+      panningRef.current = false;
+      panDidMoveRef.current = false;
+      panCommittedRef.current = false;
+    } else {
+      panningRef.current = false;
     }
-
-    // Reset pan flags
-    panningRef.current = false;
-    panDidMoveRef.current = false;
+  };  
+  
+  const onContextMenuRoot = (e: React.MouseEvent<HTMLDivElement>) => {
+    // Always prevent the browser's context menu
+    e.preventDefault();
   };
 
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -1238,7 +1279,7 @@ export default function CanvasViewport({ userId }: Props) {
     const onGlobalPointerDown = (e: PointerEvent) => {
       const target = e.target as Node | null;
       if (menuRef.current && target && menuRef.current.contains(target)) {
-        // Click happened *inside* the menu — don’t close.
+        // Click happened *inside* the menu — don't close.
         return;
       }
       // Otherwise, close on any outside left-click

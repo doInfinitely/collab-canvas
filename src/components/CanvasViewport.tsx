@@ -1054,6 +1054,7 @@ export default function CanvasViewport({ userId }: Props) {
 
   // ===== Grid (canvas) =====
   const gridCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
 
   const drawGrid = useCallback(() => {
     const canvas = gridCanvasRef.current;
@@ -1167,7 +1168,7 @@ export default function CanvasViewport({ userId }: Props) {
     }
   };
 
-  const onWheel = (e: React.WheelEvent<HTMLDivElement>) => {
+  const onWheel = (e: WheelEvent) => {
     e.preventDefault();
     if (e.ctrlKey || e.metaKey) {
       const zoomIntensity = 0.0015;
@@ -1186,6 +1187,18 @@ export default function CanvasViewport({ userId }: Props) {
     }
     schedulePublish();
   };
+
+  // Attach wheel event listener with passive: false to allow preventDefault
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    container.addEventListener('wheel', onWheel, { passive: false });
+
+    return () => {
+      container.removeEventListener('wheel', onWheel);
+    };
+  }, []);
 
   // ===== AI Pan to Coordinate =====
   const panToCoordinate = useCallback((targetX: number, targetY: number) => {
@@ -1256,6 +1269,180 @@ export default function CanvasViewport({ userId }: Props) {
       worldY: cursor.worldY,
     }));
   }, [remoteCursors, profiles]);
+
+  // AI: Update shape properties
+  const aiUpdateShapeProperties = useCallback(async (shapeId: string, updates: Partial<Shape>) => {
+    console.log('AI: Updating shape', shapeId, 'with updates:', updates);
+    
+    const shape = shapesRef.current.get(shapeId);
+    if (!shape) {
+      console.error('AI: Shape not found:', shapeId);
+      return { success: false, error: 'Shape not found' };
+    }
+
+    const now = nowIso();
+    const updatedShape = { ...shape, ...updates, updated_at: now };
+    
+    console.log('AI: Updated shape will be:', updatedShape);
+    
+    // Update local state
+    setShapes(prev => {
+      const m = new Map(prev);
+      m.set(shapeId, updatedShape);
+      return m;
+    });
+
+    // Broadcast
+    if (shapesChRef.current) {
+      shapesChRef.current.send({ 
+        type: "broadcast", 
+        event: "shape-create", 
+        payload: updatedShape 
+      });
+      console.log('AI: Broadcasted shape update');
+    } else {
+      console.warn('AI: shapesChRef is null, cannot broadcast');
+    }
+
+    // Update DB
+    const { error } = await supabase
+      .from("shapes")
+      .update(updates)
+      .eq("id", shapeId);
+
+    if (error) {
+      console.error("AI: Shape update DB error:", error);
+      // Rollback
+      setShapes(prev => {
+        const m = new Map(prev);
+        m.set(shapeId, shape);
+        return m;
+      });
+      return { success: false, error: error.message };
+    }
+
+    console.log('AI: Shape updated successfully');
+    return { success: true };
+  }, []);
+
+  // AI: Rename shape with validation
+  const aiRenameShape = useCallback(async (shapeId: string, newName: string) => {
+    if (!wordlists) {
+      return { success: false, error: 'Wordlists not loaded' };
+    }
+
+    // Parse AdjectiveNoun format
+    const match = newName.match(/^([A-Z][a-z]+)([A-Z][a-z]+)$/);
+    if (!match) {
+      return { success: false, error: 'Name must be in AdjectiveNoun format (e.g., BigCircle)' };
+    }
+
+    const [, adj, noun] = match;
+    
+    // Validate against wordlists
+    const adjLower = adj.toLowerCase();
+    const nounLower = noun.toLowerCase();
+    
+    if (!wordlists.adjs.map(a => a.toLowerCase()).includes(adjLower)) {
+      return { success: false, error: `"${adj}" is not in the adjective list` };
+    }
+    if (!wordlists.nouns.map(n => n.toLowerCase()).includes(nounLower)) {
+      return { success: false, error: `"${noun}" is not in the noun list` };
+    }
+
+    // Check if name is already taken
+    const taken = usedNames();
+    if (taken.has(newName.toLowerCase())) {
+      return { success: false, error: `Name "${newName}" is already taken` };
+    }
+
+    return await aiUpdateShapeProperties(shapeId, { name: newName });
+  }, [wordlists, aiUpdateShapeProperties]);
+
+  // AI: Add annotation to shape
+  const aiAddAnnotation = useCallback(async (shapeId: string, text: string) => {
+    const shape = shapesRef.current.get(shapeId);
+    if (!shape) {
+      return { success: false, error: 'Shape not found' };
+    }
+
+    const trimmedText = text.trim();
+    if (!trimmedText) {
+      return { success: false, error: 'Annotation text cannot be empty' };
+    }
+
+    const ann: ShapeAnnotationInsert = {
+      id: crypto.randomUUID(),
+      shape_id: shapeId,
+      user_id: userId,
+      text: trimmedText,
+      created_at: nowIso(),
+    };
+
+    // Optimistic update
+    setAnnotationsByShape(prev => {
+      const m = new Map(prev);
+      const arr = m.get(shapeId) ?? [];
+      m.set(shapeId, [...arr, ann]);
+      return m;
+    });
+
+    // Broadcast
+    annotationsChRef.current?.send({
+      type: "broadcast",
+      event: "annotation-upsert",
+      payload: ann,
+    });
+
+    // DB insert
+    const { error } = await supabase.from("shape_annotations").insert(ann);
+    if (error) {
+      console.warn("Annotation insert failed:", error.message);
+      // Rollback
+      setAnnotationsByShape(prev => {
+        const m = new Map(prev);
+        const arr = (m.get(shapeId) ?? []).filter(a => a.id !== ann.id);
+        m.set(shapeId, arr);
+        return m;
+      });
+      return { success: false, error: error.message };
+    }
+
+    return { success: true };
+  }, [userId]);
+
+  // AI: Add shapes to selection
+  const aiAddToSelection = useCallback((shapeIds: string[]) => {
+    const validIds = shapeIds.filter(id => shapesRef.current.has(id));
+    if (validIds.length === 0) {
+      return { success: false, error: 'No valid shapes found' };
+    }
+
+    setSelectedIds(prev => {
+      const newSet = new Set(prev);
+      validIds.forEach(id => newSet.add(id));
+      return newSet;
+    });
+
+    return { success: true, added: validIds.length };
+  }, []);
+
+  // AI: Remove shapes from selection
+  const aiRemoveFromSelection = useCallback((shapeIds: string[]) => {
+    setSelectedIds(prev => {
+      const newSet = new Set(prev);
+      shapeIds.forEach(id => newSet.delete(id));
+      return newSet;
+    });
+
+    return { success: true, removed: shapeIds.length };
+  }, []);
+
+  // AI: Clear selection
+  const aiClearSelection = useCallback(() => {
+    setSelectedIds(new Set());
+    return { success: true };
+  }, []);
 
   const onMouseUpRoot = (e: React.MouseEvent<HTMLDivElement>) => { 
     // Handle right mouse button up
@@ -2509,8 +2696,8 @@ export default function CanvasViewport({ userId }: Props) {
   // ===== Render =====
   return (
     <div
+      ref={containerRef}
       className="relative w-full h-full overflow-hidden bg-white select-none"
-      onWheel={onWheel}
       onMouseDown={onMouseDownRoot}
       onMouseMove={onMouseMoveRoot}
       onMouseUp={onMouseUpRoot}
@@ -3287,6 +3474,12 @@ export default function CanvasViewport({ userId }: Props) {
           getCanvasJSON={encodeCanvasToJSON}
           getSelectedShapeIds={getSelectedShapeIds}
           getUserCursors={getUserCursors}
+          aiUpdateShapeProperties={aiUpdateShapeProperties}
+          aiRenameShape={aiRenameShape}
+          aiAddAnnotation={aiAddAnnotation}
+          aiAddToSelection={aiAddToSelection}
+          aiRemoveFromSelection={aiRemoveFromSelection}
+          aiClearSelection={aiClearSelection}
         />
       </Portal>
     </div>

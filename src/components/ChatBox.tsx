@@ -15,6 +15,12 @@ type FunctionCall = {
   arguments: Record<string, any>;
 };
 
+type AIActionResult = {
+  success: boolean;
+  error?: string;
+  [key: string]: any;
+};
+
 type ChatBoxProps = {
   onPanToCoordinate: (x: number, y: number) => void;
   canvasState: {
@@ -27,6 +33,12 @@ type ChatBoxProps = {
   getCanvasJSON: () => string;
   getSelectedShapeIds: () => string[];
   getUserCursors: () => Array<{ userId: string; email: string; worldX: number; worldY: number }>;
+  aiUpdateShapeProperties: (shapeId: string, updates: any) => Promise<AIActionResult>;
+  aiRenameShape: (shapeId: string, newName: string) => Promise<AIActionResult>;
+  aiAddAnnotation: (shapeId: string, text: string) => Promise<AIActionResult>;
+  aiAddToSelection: (shapeIds: string[]) => AIActionResult;
+  aiRemoveFromSelection: (shapeIds: string[]) => AIActionResult;
+  aiClearSelection: () => AIActionResult;
 };
 
 export default function ChatBox({ 
@@ -35,6 +47,12 @@ export default function ChatBox({
   getCanvasJSON,
   getSelectedShapeIds,
   getUserCursors,
+  aiUpdateShapeProperties,
+  aiRenameShape,
+  aiAddAnnotation,
+  aiAddToSelection,
+  aiRemoveFromSelection,
+  aiClearSelection,
 }: ChatBoxProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -92,12 +110,44 @@ export default function ChatBox({
 
       // Execute function calls
       if (data.functionCalls && data.functionCalls.length > 0) {
+        console.log('ChatBox: Executing function calls:', data.functionCalls);
         for (const call of data.functionCalls) {
-          if (call.name === "panToCoordinate") {
-            onPanToCoordinate(call.arguments.x, call.arguments.y);
+          try {
+            console.log('ChatBox: Executing function:', call.name, call.arguments);
+            if (call.name === "panToCoordinate") {
+              onPanToCoordinate(call.arguments.x, call.arguments.y);
+            } else if (call.name === "updateShapeProperties") {
+              console.log('ChatBox: Calling aiUpdateShapeProperties with:', call.arguments.shapeId, call.arguments.updates);
+              const result = await aiUpdateShapeProperties(call.arguments.shapeId, call.arguments.updates);
+              console.log('ChatBox: aiUpdateShapeProperties result:', result);
+              if (!result.success && result.error) {
+                console.error('Update failed:', result.error);
+              }
+            } else if (call.name === "renameShape") {
+              const result = await aiRenameShape(call.arguments.shapeId, call.arguments.newName);
+              if (!result.success && result.error) {
+                console.error('Rename failed:', result.error);
+              }
+            } else if (call.name === "addAnnotation") {
+              const result = await aiAddAnnotation(call.arguments.shapeId, call.arguments.text);
+              if (!result.success && result.error) {
+                console.error('Annotation failed:', result.error);
+              }
+            } else if (call.name === "addToSelection") {
+              const result = aiAddToSelection(call.arguments.shapeIds);
+              if (!result.success && result.error) {
+                console.error('Selection add failed:', result.error);
+              }
+            } else if (call.name === "removeFromSelection") {
+              aiRemoveFromSelection(call.arguments.shapeIds);
+            } else if (call.name === "clearSelection") {
+              aiClearSelection();
+            }
+            // For read-only functions, the data is already included in call.data
+            // The AI will format and present this information in its response
+          } catch (error) {
+            console.error('Function execution error:', error);
           }
-          // For read-only functions, the data is already included in call.data
-          // The AI will format and present this information in its response
         }
       }
 
@@ -205,12 +255,15 @@ export default function ChatBox({
         {messages.length === 0 && (
           <div className="text-center text-gray-500 text-sm mt-8">
             <p className="mb-2">👋 Hi! I'm your AI assistant.</p>
-            <p>Try asking me to:</p>
-            <ul className="mt-2 text-left inline-block">
-              <li>• "Pan to coordinates 500, 300"</li>
-              <li>• "What shapes are on the canvas?"</li>
-              <li>• "What do I have selected?"</li>
-              <li>• "Where are other users?"</li>
+            <p>I can help you:</p>
+            <ul className="mt-2 text-left inline-block text-xs">
+              <li>• "Move the selected shape to 500, 300"</li>
+              <li>• "Change the color of BigCircle to red"</li>
+              <li>• "Make the selected shape bigger"</li>
+              <li>• "Rename this shape to BlueSquare"</li>
+              <li>• "Add a note: 'needs review'"</li>
+              <li>• "Select all circles"</li>
+              <li>• "What's on the canvas?"</li>
             </ul>
           </div>
         )}

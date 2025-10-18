@@ -195,14 +195,14 @@ Example for "make the selected shapes blue" (MOST EFFICIENT):
         type: 'function',
         function: {
           name: 'updateShapesProperties',
-          description: 'Update the same properties for multiple shapes at once. More efficient than multiple updateShapeProperties calls when applying the same changes to many shapes (e.g., moving all selected shapes, changing color of all circles, etc).',
+          description: 'Update the same properties for multiple shapes at once. More efficient than multiple updateShapeProperties calls when applying the same changes to many shapes (e.g., moving all selected shapes, changing color of all circles, etc). IMPORTANT: Shape IDs are strings (UUIDs). When parsing canvas JSON, extract the "id" field from each shape object (e.g., shapes.map(s => s.id)).',
           parameters: {
             type: 'object',
             properties: {
               shapeIds: {
                 type: 'array',
                 items: { type: 'string' },
-                description: 'Array of shape IDs to update',
+                description: 'Array of shape IDs (strings) to update. Extract these from shape.id in the canvas JSON.',
               },
               updates: {
                 type: 'object',
@@ -803,7 +803,9 @@ Example for "make the selected shapes blue" (MOST EFFICIENT):
             arguments: args,
           });
         } else if (functionName === 'updateShapesProperties') {
-          functionResult = JSON.stringify({ success: true, message: `Updated ${args.shapeIds.length} shapes` });
+          console.log('API: updateShapesProperties called with', args.shapeIds?.length || 0, 'shape IDs');
+          console.log('API: First few IDs:', args.shapeIds?.slice(0, 5));
+          functionResult = JSON.stringify({ success: true, message: `Updated ${args.shapeIds?.length || 0} shapes` });
           actionFunctionCalls.push({
             id: toolCall.id,
             name: functionName,
@@ -1052,7 +1054,9 @@ Example for "make the selected shapes blue" (MOST EFFICIENT):
               arguments: args,
             });
           } else if (functionName === 'updateShapesProperties') {
-            functionResult = JSON.stringify({ success: true, message: `Updated ${args.shapeIds.length} shapes` });
+            console.log('API (round ' + roundNumber + '): updateShapesProperties called with', args.shapeIds?.length || 0, 'shape IDs');
+            console.log('API: First few IDs:', args.shapeIds?.slice(0, 5));
+            functionResult = JSON.stringify({ success: true, message: `Updated ${args.shapeIds?.length || 0} shapes` });
             actionFunctionCalls.push({
               id: toolCall.id,
               name: functionName,

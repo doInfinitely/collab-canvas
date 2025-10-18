@@ -1487,9 +1487,17 @@ export default function CanvasViewport({ userId }: Props) {
 
   // AI: Update properties for multiple shapes
   const aiUpdateShapesProperties = useCallback(async (shapeIds: string[], updates: Partial<Shape>) => {
+    console.log('AI: updateShapesProperties called with', shapeIds.length, 'shape IDs');
+    console.log('AI: First few IDs:', shapeIds.slice(0, 5));
+    console.log('AI: shapesRef has', shapesRef.current.size, 'shapes');
+    console.log('AI: First few shape IDs in ref:', Array.from(shapesRef.current.keys()).slice(0, 5));
+    
     const validIds = shapeIds.filter(id => shapesRef.current.has(id));
+    console.log('AI: Found', validIds.length, 'valid IDs out of', shapeIds.length);
+    
     if (validIds.length === 0) {
-      return { success: false, error: 'No valid shapes found' };
+      console.error('AI: No valid shapes found. Received IDs:', shapeIds.slice(0, 10));
+      return { success: false, error: `No valid shapes found. Received ${shapeIds.length} IDs but none exist in current shapes.` };
     }
 
     // Round numeric values to avoid database integer errors

@@ -25,6 +25,7 @@ type Shape = {
 
   name?: string; // NEW
   text_md?: string;
+  text_color?: string; // NEW
 };
 
 type Annotation = {
@@ -433,16 +434,17 @@ export default function CanvasViewport({ userId }: Props) {
   const [strokeColorInput, setStrokeColorInput] = useState<string>("");
   const [fillColorInput, setFillColorInput] = useState<string>("");
   const [noFill, setNoFill] = useState<boolean>(false);
+  const [textColorInput, setTextColorInput] = useState<string>(""); // NEW
 
   // Color picker popover
   const [picker, setPicker] = useState<null | {
-    for: "stroke" | "fill";
+    for: "stroke" | "fill" | "text"; // UPDATED
     x: number;
     y: number;
-    initial?: string;   // NEW
+    initial?: string;
   }>(null);
   const [recentColors, setRecentColors] = useState<string[]>([]);
-  const [lastColorTarget, setLastColorTarget] = useState<"stroke" | "fill">("stroke"); // NEW
+  const [lastColorTarget, setLastColorTarget] = useState<"stroke" | "fill" | "text">("stroke"); // UPDATED
 
   // refs
   const offsetRef = useRef(offset);
@@ -933,6 +935,25 @@ export default function CanvasViewport({ userId }: Props) {
       });
     });
 
+    ch.on("broadcast", { event: "shape-style" }, ({ payload }: { payload: { ids: string[]; stroke?: string; fill?: string | null; stroke_width?: number; text_color?: string; updated_at?: string } }) => {
+      setShapes(prev => {
+        const m = new Map(prev);
+        for (const id of payload.ids) {
+          const s = m.get(id);
+          if (!s) continue;
+          m.set(id, {
+            ...s,
+            stroke: payload.stroke ?? s.stroke,
+            fill: (payload.fill === undefined ? s.fill : payload.fill),
+            stroke_width: payload.stroke_width ?? s.stroke_width,
+            text_color: payload.text_color ?? s.text_color, // NEW
+            updated_at: payload.updated_at ?? s.updated_at
+          });
+        }
+        return m;
+      });
+    });
+
     ch.subscribe();
     return () => {
       try { ch.unsubscribe(); } catch {}
@@ -1406,6 +1427,7 @@ export default function CanvasViewport({ userId }: Props) {
           stroke: "#000000", stroke_width: 2, fill: "#ffffff",
           updated_at: nowIso(), sides: 4, rotation: 0, z: frontZ(),
           name,
+          text_color: "#000000", // ADD THIS
         };
         upsertShapeLocal(shape);
         shapesChRef.current?.send({ type: "broadcast", event: "shape-create", payload: shape });
@@ -1653,6 +1675,7 @@ export default function CanvasViewport({ userId }: Props) {
     // Initialize style inputs
     setStrokeWidthInput(String(s?.stroke_width ?? 2));
     setStrokeColorInput(String(s?.stroke ?? "#000000"));
+    setTextColorInput(String(s?.text_color ?? "#000000")); // NEW
     if (s?.fill == null) {
       setNoFill(true);
       setFillColorInput("#ffffff");
@@ -1660,7 +1683,7 @@ export default function CanvasViewport({ userId }: Props) {
       setNoFill(false);
       setFillColorInput(String(s.fill));
     }
-    setLastColorTarget("stroke"); // default
+    setLastColorTarget("stroke");
 
     try {
       const { data, error } = await supabase
@@ -1775,13 +1798,15 @@ export default function CanvasViewport({ userId }: Props) {
     const sw = Number(strokeWidthInput);
     const strokeHex = normalizeHex(strokeColorInput || "");
     const fillHex = noFill ? null : normalizeHex(fillColorInput || "");
+    const textHex = normalizeHex(textColorInput || ""); // NEW
 
-    if (!Number.isFinite(sw) || sw <= 0 || !strokeHex || (!noFill && !fillHex)) {
+    if (!Number.isFinite(sw) || sw <= 0 || !strokeHex || (!noFill && !fillHex) || !textHex) { // UPDATED
       const s = shapesRef.current.get(modalShapeId);
       if (s) {
         if (!Number.isFinite(sw) || sw <= 0) setStrokeWidthInput(String(s.stroke_width));
         if (!strokeHex) setStrokeColorInput(s.stroke);
         if (!noFill && !fillHex) setFillColorInput(s.fill ?? "#ffffff");
+        if (!textHex) setTextColorInput(s.text_color ?? "#000000"); // NEW
       }
       return;
     }
@@ -1800,6 +1825,7 @@ export default function CanvasViewport({ userId }: Props) {
           stroke: strokeHex,
           stroke_width: sw,
           fill: fillHex,
+          text_color: textHex, // NEW
           updated_at: now
         });
       }
@@ -1809,20 +1835,21 @@ export default function CanvasViewport({ userId }: Props) {
     shapesChRef.current?.send({
       type: "broadcast",
       event: "shape-style",
-      payload: { ids, stroke: strokeHex, fill: fillHex, stroke_width: sw, updated_at: now }
+      payload: { ids, stroke: strokeHex, fill: fillHex, stroke_width: sw, text_color: textHex, updated_at: now } // UPDATED
     });
 
     try {
       const { error } = await supabase
         .from("shapes")
-        .update({ stroke: strokeHex, stroke_width: sw, fill: fillHex, updated_at: now })
+        .update({ stroke: strokeHex, stroke_width: sw, fill: fillHex, text_color: textHex, updated_at: now }) // UPDATED
         .in("id", ids);
       if (error) console.warn("Update style failed:", error.message);
     } catch (err) { console.warn("Update style exception:", err); }
 
     addRecentColor(strokeHex);
     if (fillHex) addRecentColor(fillHex);
-  }, [modalShapeId, strokeWidthInput, strokeColorInput, fillColorInput, noFill]);
+    addRecentColor(textHex); // NEW
+  }, [modalShapeId, strokeWidthInput, strokeColorInput, fillColorInput, textColorInput, noFill]); // UPDATED dependencies
 
   // ===== z-index helpers/buttons =====
   const saveZIndex = useCallback(async (zValue: number) => {
@@ -2029,21 +2056,22 @@ export default function CanvasViewport({ userId }: Props) {
                   onClick={(e) => e.stopPropagation()}
                   onMouseDown={(e) => e.stopPropagation()}
                 />
-              ) : (
-                <div
-                  className="w-full h-full p-2 overflow-auto rounded"
-                  style={{ 
-                    fontSize: Math.max(10, 14 * scale),
-                    pointerEvents: 'none', // Let clicks pass through to SVG
-                  }}
-                >
-                  {s.text_md ? (
-                    <div dangerouslySetInnerHTML={{ __html: renderMarkdown(s.text_md) }} />
-                  ) : (
-                    <div className="text-gray-400 text-xs opacity-50">Click to add text</div>
-                  )}
-                </div>
-              )}
+                ) : (
+                  <div
+                    className="w-full h-full p-2 overflow-auto rounded"
+                    style={{ 
+                      fontSize: Math.max(10, 14 * scale),
+                      pointerEvents: 'none',
+                      color: s.text_color && HEX_RE.test(s.text_color) ? s.text_color : '#000000', // UPDATED with validation
+                    }}
+                  >
+                    {s.text_md ? (
+                      <div dangerouslySetInnerHTML={{ __html: renderMarkdown(s.text_md) }} />
+                    ) : (
+                      <div className="text-gray-400 text-xs opacity-50">Click to add text</div>
+                    )}
+                  </div>
+                )}
             </div>
           );
         })}
@@ -2294,7 +2322,47 @@ export default function CanvasViewport({ userId }: Props) {
                   </div>
                   <div className="self-center text-xs text-gray-500">Preview</div>
                 </div>
+                {/* Text color */}
+                <div className="mb-3 grid grid-cols-[1fr_auto] items-end gap-3">
+                  <div>
+                    <label className="mb-1 block text-xs text-gray-600">Text color (hex)</label>
+                    <div className="flex items-center gap-3">
+                      <input
+                        className={`w-full rounded-md border px-2 py-1.5 text-sm outline-none ${HEX_RE.test(textColorInput) ? "border-gray-300 focus:border-blue-500" : "border-red-400 focus:border-red-500"}`}
+                        placeholder="#000000"
+                        value={textColorInput}
+                        onChange={(e) => setTextColorInput(e.target.value)}
+                        onFocus={() => setLastColorTarget("text")}
+                      />
+                      <button
+                        type="button"
+                        className="aspect-square w-12 rounded border border-gray-300"
+                        style={{
+                          background: HEX_RE.test(textColorInput)
+                            ? textColorInput
+                            : "repeating-conic-gradient(#ddd 0% 25%, #fff 0% 50%) 50%/10px 10px"
+                        }}
+                        onClick={(e) => {
+                          const rect = (e.currentTarget as HTMLButtonElement).getBoundingClientRect();
+                          setLastColorTarget("text");
 
+                          const safeInitial = HEX6.test(textColorInput) ? textColorInput : "#000000";
+                          setPicker({
+                            for: "text",
+                            x: rect.left + window.scrollX,
+                            y: rect.bottom + 6 + window.scrollY,
+                            initial: safeInitial,
+                          });
+                        }}
+                        title="Pick text color"
+                      />
+                    </div>
+                    {!HEX_RE.test(textColorInput) && (
+                      <div className="mt-1 text-xs text-red-600">Enter a valid hex like #000000 or #000</div>
+                    )}
+                  </div>
+                  <div className="self-center text-xs text-gray-500">Preview</div>
+                </div>
                 {/* Recent colors + target toggle */}
                 {recentColors.length > 0 && (
                   <div className="mb-1 flex items-center gap-2 text-xs text-gray-600">
@@ -2314,6 +2382,13 @@ export default function CanvasViewport({ userId }: Props) {
                       >
                         Fill
                       </button>
+                      <button
+                        className={`rounded px-2 py-0.5 ${lastColorTarget === "text" ? "bg-gray-200" : "hover:bg-gray-100"}`}
+                        onClick={() => setLastColorTarget("text")}
+                        title="Apply to text"
+                      >
+                        Text
+                      </button>
                     </div>
                   </div>
                 )}
@@ -2322,12 +2397,13 @@ export default function CanvasViewport({ userId }: Props) {
                     {recentColors.map((c) => (
                       <button
                         key={c}
-                        className="aspect-square w-8 rounded border border-gray-300"  // was: "h-8 w-8"
+                        className="aspect-square w-8 rounded border border-gray-300"
                         style={{ background: c }}
                         title={`${c} → ${lastColorTarget}`}
                         onClick={() => {
                           if (lastColorTarget === "stroke") setStrokeColorInput(c);
-                          else setFillColorInput(c);
+                          else if (lastColorTarget === "fill") setFillColorInput(c);
+                          else setTextColorInput(c); // NEW
                         }}
                       />
                     ))}
@@ -2343,7 +2419,8 @@ export default function CanvasViewport({ userId }: Props) {
                       !Number.isFinite(Number(strokeWidthInput)) ||
                       Number(strokeWidthInput) <= 0 ||
                       !HEX_RE.test(strokeColorInput) ||
-                      (!noFill && !HEX_RE.test(fillColorInput))
+                      (!noFill && !HEX_RE.test(fillColorInput)) ||
+                      !HEX_RE.test(textColorInput) // NEW
                     }
                   >
                     Save style
@@ -2444,11 +2521,13 @@ export default function CanvasViewport({ userId }: Props) {
               onClose={() => setPicker(null)}
               onPick={(hex) => {
                 if (picker.for === "stroke") setStrokeColorInput(hex);
-                else setFillColorInput(hex);
+                else if (picker.for === "fill") setFillColorInput(hex);
+                else setTextColorInput(hex); // NEW
               }}
               onPickRecent={(hex) => {
                 if (picker.for === "stroke") setStrokeColorInput(hex);
-                else setFillColorInput(hex);
+                else if (picker.for === "fill") setFillColorInput(hex);
+                else setTextColorInput(hex); // NEW
               }}
             />
           </div>

@@ -33,12 +33,30 @@ type ChatBoxProps = {
   getCanvasJSON: () => string;
   getSelectedShapeIds: () => string[];
   getUserCursors: () => Array<{ userId: string; email: string; worldX: number; worldY: number }>;
+  getUIState: () => any;
+  aiGetViewport: () => any;
   aiUpdateShapeProperties: (shapeId: string, updates: any) => Promise<AIActionResult>;
   aiRenameShape: (shapeId: string, newName: string) => Promise<AIActionResult>;
   aiAddAnnotation: (shapeId: string, text: string) => Promise<AIActionResult>;
   aiAddToSelection: (shapeIds: string[]) => AIActionResult;
   aiRemoveFromSelection: (shapeIds: string[]) => AIActionResult;
   aiClearSelection: () => AIActionResult;
+  aiCreateShape: (params: any) => Promise<AIActionResult>;
+  aiDeleteShapes: (shapeIds: string[]) => Promise<AIActionResult>;
+  aiToggleShapeModal: (action: 'open' | 'close' | 'toggle', shapeId?: string) => AIActionResult;
+  aiToggleDebugHUD: (action: 'show' | 'hide' | 'toggle') => AIActionResult;
+  aiToggleCanvasMenu: (action: 'show' | 'hide' | 'toggle', tab?: 'export' | 'versions') => AIActionResult;
+  aiDownloadPNG: () => AIActionResult;
+  aiDownloadSVG: () => AIActionResult;
+  aiDownloadJSON: () => AIActionResult;
+  aiSaveVersion: () => Promise<AIActionResult>;
+  aiRestoreVersion: (identifier: string | number) => Promise<AIActionResult>;
+  aiSetZoom: (zoomLevel: number, focusX?: number, focusY?: number) => AIActionResult;
+  aiSetPan: (x: number, y: number) => AIActionResult;
+  aiCreateShapes: (shapesList: any[]) => Promise<AIActionResult>;
+  aiAddAnnotations: (annotations: Array<{ shapeId: string; text: string }>) => Promise<AIActionResult>;
+  aiUpdateShapesProperties: (shapeIds: string[], updates: any) => Promise<AIActionResult>;
+  aiUpdateSelectionProperties: (updates: any) => Promise<AIActionResult>;
 };
 
 export default function ChatBox({ 
@@ -47,12 +65,30 @@ export default function ChatBox({
   getCanvasJSON,
   getSelectedShapeIds,
   getUserCursors,
+  getUIState,
+  aiGetViewport,
   aiUpdateShapeProperties,
   aiRenameShape,
   aiAddAnnotation,
   aiAddToSelection,
   aiRemoveFromSelection,
   aiClearSelection,
+  aiCreateShape,
+  aiDeleteShapes,
+  aiToggleShapeModal,
+  aiToggleDebugHUD,
+  aiToggleCanvasMenu,
+  aiDownloadPNG,
+  aiDownloadSVG,
+  aiDownloadJSON,
+  aiSaveVersion,
+  aiRestoreVersion,
+  aiSetZoom,
+  aiSetPan,
+  aiCreateShapes,
+  aiAddAnnotations,
+  aiUpdateShapesProperties,
+  aiUpdateSelectionProperties,
 }: ChatBoxProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -88,6 +124,12 @@ export default function ChatBox({
     setIsLoading(true);
 
     try {
+      // Prepare message history for context (exclude system messages)
+      const messageHistory = messages.map(msg => ({
+        role: msg.role,
+        content: msg.content,
+      }));
+
       const response = await fetch("/api/ai-chat", {
         method: "POST",
         headers: {
@@ -95,10 +137,12 @@ export default function ChatBox({
         },
         body: JSON.stringify({
           message: inputValue,
+          messageHistory, // Include conversation history for context
           canvasState,
           canvasJSON: getCanvasJSON(),
           selectedShapeIds: getSelectedShapeIds(),
           userCursors: getUserCursors(),
+          uiState: getUIState(),
         }),
       });
 
@@ -142,6 +186,71 @@ export default function ChatBox({
               aiRemoveFromSelection(call.arguments.shapeIds);
             } else if (call.name === "clearSelection") {
               aiClearSelection();
+            } else if (call.name === "createShape") {
+              const result = await aiCreateShape(call.arguments);
+              if (!result.success && result.error) {
+                console.error('Shape creation failed:', result.error);
+              }
+            } else if (call.name === "deleteShapes") {
+              const result = await aiDeleteShapes(call.arguments.shapeIds);
+              if (!result.success && result.error) {
+                console.error('Shape deletion failed:', result.error);
+              }
+            } else if (call.name === "toggleShapeModal") {
+              const result = aiToggleShapeModal(call.arguments.action, call.arguments.shapeId);
+              if (!result.success && result.error) {
+                console.error('Modal toggle failed:', result.error);
+              }
+            } else if (call.name === "toggleDebugHUD") {
+              aiToggleDebugHUD(call.arguments.action);
+            } else if (call.name === "toggleCanvasMenu") {
+              aiToggleCanvasMenu(call.arguments.action, call.arguments.tab);
+            } else if (call.name === "downloadPNG") {
+              aiDownloadPNG();
+            } else if (call.name === "downloadSVG") {
+              aiDownloadSVG();
+            } else if (call.name === "downloadJSON") {
+              aiDownloadJSON();
+            } else if (call.name === "saveVersion") {
+              const result = await aiSaveVersion();
+              if (!result.success) {
+                console.error('Version save failed');
+              }
+            } else if (call.name === "restoreVersion") {
+              const result = await aiRestoreVersion(call.arguments.identifier);
+              if (!result.success && result.error) {
+                console.error('Version restore failed:', result.error);
+              }
+            } else if (call.name === "setZoom") {
+              const result = aiSetZoom(call.arguments.zoomLevel, call.arguments.focusX, call.arguments.focusY);
+              if (!result.success && result.error) {
+                console.error('Zoom change failed:', result.error);
+              }
+            } else if (call.name === "setPan") {
+              const result = aiSetPan(call.arguments.x, call.arguments.y);
+              if (!result.success && result.error) {
+                console.error('Pan change failed:', result.error);
+              }
+            } else if (call.name === "createShapes") {
+              const result = await aiCreateShapes(call.arguments.shapes);
+              if (!result.success && result.error) {
+                console.error('Batch shape creation failed:', result.error);
+              }
+            } else if (call.name === "addAnnotations") {
+              const result = await aiAddAnnotations(call.arguments.annotations);
+              if (!result.success && result.error) {
+                console.error('Batch annotation failed:', result.error);
+              }
+            } else if (call.name === "updateShapesProperties") {
+              const result = await aiUpdateShapesProperties(call.arguments.shapeIds, call.arguments.updates);
+              if (!result.success && result.error) {
+                console.error('Batch shape update failed:', result.error);
+              }
+            } else if (call.name === "updateSelectionProperties") {
+              const result = await aiUpdateSelectionProperties(call.arguments.updates);
+              if (!result.success && result.error) {
+                console.error('Selection update failed:', result.error);
+              }
             }
             // For read-only functions, the data is already included in call.data
             // The AI will format and present this information in its response
@@ -232,22 +341,44 @@ export default function ChatBox({
           </svg>
           <h3 className="font-semibold">AI Assistant</h3>
         </div>
-        <button
-          onClick={() => setIsExpanded(false)}
-          className="text-white hover:bg-blue-700 rounded p-1 transition-colors"
-          title="Minimize"
-        >
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            fill="none"
-            viewBox="0 0 24 24"
-            strokeWidth={2}
-            stroke="currentColor"
-            className="w-5 h-5"
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => setMessages([])}
+            className="text-white hover:bg-blue-700 rounded p-1 transition-colors"
+            title="Clear conversation"
           >
-            <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
-          </svg>
-        </button>
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              fill="none"
+              viewBox="0 0 24 24"
+              strokeWidth={2}
+              stroke="currentColor"
+              className="w-5 h-5"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0"
+              />
+            </svg>
+          </button>
+          <button
+            onClick={() => setIsExpanded(false)}
+            className="text-white hover:bg-blue-700 rounded p-1 transition-colors"
+            title="Minimize"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              fill="none"
+              viewBox="0 0 24 24"
+              strokeWidth={2}
+              stroke="currentColor"
+              className="w-5 h-5"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
+            </svg>
+          </button>
+        </div>
       </div>
 
       {/* Messages */}
@@ -257,13 +388,16 @@ export default function ChatBox({
             <p className="mb-2">👋 Hi! I'm your AI assistant.</p>
             <p>I can help you:</p>
             <ul className="mt-2 text-left inline-block text-xs">
-              <li>• "Move the selected shape to 500, 300"</li>
-              <li>• "Change the color of BigCircle to red"</li>
-              <li>• "Make the selected shape bigger"</li>
-              <li>• "Rename this shape to BlueSquare"</li>
-              <li>• "Add a note: 'needs review'"</li>
-              <li>• "Select all circles"</li>
-              <li>• "What's on the canvas?"</li>
+              <li>• "Create a blue circle at 500, 300"</li>
+              <li>• "Delete the selected shapes"</li>
+              <li>• "Zoom to 200%"</li>
+              <li>• "Move BigCircle to 100, 200"</li>
+              <li>• "Change the fill color to red"</li>
+              <li>• "Add 2 sides to the hexagon"</li>
+              <li>• "Toggle the debug HUD"</li>
+              <li>• "Download this canvas as PNG"</li>
+              <li>• "Save this version"</li>
+              <li>• "What's the current zoom?"</li>
             </ul>
           </div>
         )}

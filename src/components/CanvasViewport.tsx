@@ -1270,6 +1270,23 @@ export default function CanvasViewport({ userId }: Props) {
     }));
   }, [remoteCursors, profiles]);
 
+  // AI: Get UI state (modals, HUD, versions)
+  const getUIState = useCallback(() => {
+    return {
+      shapeModalOpen: modalShapeId !== null,
+      shapeModalShapeId: modalShapeId,
+      debugHUDVisible: showDebug,
+      canvasMenuOpen: showCanvasMenu,
+      canvasMenuTab: canvasMenuTab,
+      availableVersions: canvasVersions.map(v => ({
+        id: v.id,
+        created_at: v.created_at,
+        created_by: v.created_by,
+        email: profiles.get(v.created_by) ?? v.created_by,
+      })),
+    };
+  }, [modalShapeId, showDebug, showCanvasMenu, canvasMenuTab, canvasVersions, profiles]);
+
   // AI: Update shape properties
   const aiUpdateShapeProperties = useCallback(async (shapeId: string, updates: Partial<Shape>) => {
     console.log('AI: Updating shape', shapeId, 'with updates:', updates);
@@ -1280,8 +1297,15 @@ export default function CanvasViewport({ userId }: Props) {
       return { success: false, error: 'Shape not found' };
     }
 
+    // Round numeric values to avoid database integer errors
+    const roundedUpdates = { ...updates };
+    if (roundedUpdates.x !== undefined) roundedUpdates.x = Math.round(roundedUpdates.x);
+    if (roundedUpdates.y !== undefined) roundedUpdates.y = Math.round(roundedUpdates.y);
+    if (roundedUpdates.width !== undefined) roundedUpdates.width = Math.round(roundedUpdates.width);
+    if (roundedUpdates.height !== undefined) roundedUpdates.height = Math.round(roundedUpdates.height);
+
     const now = nowIso();
-    const updatedShape = { ...shape, ...updates, updated_at: now };
+    const updatedShape = { ...shape, ...roundedUpdates, updated_at: now };
     
     console.log('AI: Updated shape will be:', updatedShape);
     
@@ -1307,7 +1331,7 @@ export default function CanvasViewport({ userId }: Props) {
     // Update DB
     const { error } = await supabase
       .from("shapes")
-      .update(updates)
+      .update(roundedUpdates)
       .eq("id", shapeId);
 
     if (error) {
@@ -1411,6 +1435,205 @@ export default function CanvasViewport({ userId }: Props) {
     return { success: true };
   }, [userId]);
 
+  // AI: Add annotations to multiple shapes
+  const aiAddAnnotations = useCallback(async (annotations: Array<{ shapeId: string; text: string }>) => {
+    const validAnnotations = annotations.filter(({ shapeId }) => shapesRef.current.has(shapeId));
+    if (validAnnotations.length === 0) {
+      return { success: false, error: 'No valid shapes found' };
+    }
+
+    const createdAnnotations: Annotation[] = [];
+    const annotationsToRollback: Array<{ shapeId: string; id: string }> = [];
+
+    // Create all annotations
+    for (const { shapeId, text } of validAnnotations) {
+      const ann: Annotation = {
+        id: crypto.randomUUID(),
+        shape_id: shapeId,
+        user_id: userId,
+        text,
+        created_at: nowIso(),
+      };
+      createdAnnotations.push(ann);
+      annotationsToRollback.push({ shapeId, id: ann.id });
+
+      // Update local state
+      setAnnotationsByShape(prev => {
+        const m = new Map(prev);
+        const arr = m.get(shapeId) ?? [];
+        m.set(shapeId, [...arr, ann]);
+        return m;
+      });
+    }
+
+    // Batch insert to DB
+    const { error } = await supabase.from("shape_annotations").insert(createdAnnotations);
+    if (error) {
+      console.warn("Batch annotation insert failed:", error.message);
+      // Rollback all
+      for (const { shapeId, id } of annotationsToRollback) {
+        setAnnotationsByShape(prev => {
+          const m = new Map(prev);
+          const arr = (m.get(shapeId) ?? []).filter(a => a.id !== id);
+          m.set(shapeId, arr);
+          return m;
+        });
+      }
+      return { success: false, error: error.message };
+    }
+
+    return { success: true, count: createdAnnotations.length };
+  }, [userId]);
+
+  // AI: Update properties for multiple shapes
+  const aiUpdateShapesProperties = useCallback(async (shapeIds: string[], updates: Partial<Shape>) => {
+    const validIds = shapeIds.filter(id => shapesRef.current.has(id));
+    if (validIds.length === 0) {
+      return { success: false, error: 'No valid shapes found' };
+    }
+
+    // Round numeric values to avoid database integer errors
+    const roundedUpdates = { ...updates };
+    if (roundedUpdates.x !== undefined) roundedUpdates.x = Math.round(roundedUpdates.x);
+    if (roundedUpdates.y !== undefined) roundedUpdates.y = Math.round(roundedUpdates.y);
+    if (roundedUpdates.width !== undefined) roundedUpdates.width = Math.round(roundedUpdates.width);
+    if (roundedUpdates.height !== undefined) roundedUpdates.height = Math.round(roundedUpdates.height);
+
+    const now = nowIso();
+    const shapesToRestore: Shape[] = [];
+
+    // Update local state for all shapes
+    setShapes(prev => {
+      const m = new Map(prev);
+      for (const id of validIds) {
+        const shape = m.get(id);
+        if (shape) {
+          shapesToRestore.push(shape);
+          const updatedShape = { ...shape, ...roundedUpdates, updated_at: now };
+          m.set(id, updatedShape);
+
+          // Broadcast
+          shapesChRef.current?.send({ 
+            type: "broadcast", 
+            event: "shape-create", 
+            payload: updatedShape 
+          });
+        }
+      }
+      return m;
+    });
+
+    // Batch update DB
+    const { error } = await supabase
+      .from("shapes")
+      .update(roundedUpdates)
+      .in("id", validIds);
+
+    if (error) {
+      console.error("Batch shape update DB error:", error);
+      // Rollback all
+      setShapes(prev => {
+        const m = new Map(prev);
+        for (const shape of shapesToRestore) {
+          m.set(shape.id, shape);
+        }
+        return m;
+      });
+      return { success: false, error: error.message };
+    }
+
+    return { success: true, count: validIds.length };
+  }, []);
+
+  // AI: Update properties for current selection
+  const aiUpdateSelectionProperties = useCallback(async (updates: Partial<Shape>) => {
+    const selectedIdsArray = Array.from(selectedIds);
+    if (selectedIdsArray.length === 0) {
+      return { success: false, error: 'No shapes selected' };
+    }
+
+    // Round numeric values to avoid database integer errors
+    const roundedUpdates = { ...updates };
+    if (roundedUpdates.x !== undefined) roundedUpdates.x = Math.round(roundedUpdates.x);
+    if (roundedUpdates.y !== undefined) roundedUpdates.y = Math.round(roundedUpdates.y);
+    if (roundedUpdates.width !== undefined) roundedUpdates.width = Math.round(roundedUpdates.width);
+    if (roundedUpdates.height !== undefined) roundedUpdates.height = Math.round(roundedUpdates.height);
+
+    const now = nowIso();
+    const shapesToRestore: Shape[] = [];
+
+    // Update local state for all selected shapes
+    setShapes(prev => {
+      const m = new Map(prev);
+      for (const id of selectedIdsArray) {
+        const shape = m.get(id);
+        if (shape) {
+          shapesToRestore.push(shape);
+          const updatedShape = { ...shape, ...roundedUpdates, updated_at: now };
+          m.set(id, updatedShape);
+
+          // Broadcast
+          shapesChRef.current?.send({ 
+            type: "broadcast", 
+            event: "shape-create", 
+            payload: updatedShape 
+          });
+        }
+      }
+      return m;
+    });
+
+    // Batch update DB
+    const { error } = await supabase
+      .from("shapes")
+      .update(roundedUpdates)
+      .in("id", selectedIdsArray);
+
+    if (error) {
+      console.error("Selection update DB error:", error);
+      // Rollback all
+      setShapes(prev => {
+        const m = new Map(prev);
+        for (const shape of shapesToRestore) {
+          m.set(shape.id, shape);
+        }
+        return m;
+      });
+      return { success: false, error: error.message };
+    }
+
+    return { success: true, count: selectedIdsArray.length };
+  }, [selectedIds]);
+
+  // Helper functions for z-index
+  const frontZ = () => {
+    const values = Array.from(shapesRef.current.values());
+    const maxZ = values.length ? Math.max(...values.map(s => s.z ?? 0)) : 0;
+    return Math.floor(maxZ) + 1;
+  };
+  const backZ = () => {
+    const values = Array.from(shapesRef.current.values());
+    const minZ = values.length ? Math.min(...values.map(s => s.z ?? 0)) : 0;
+    return Math.ceil(minZ) - 1;
+  };
+
+  // Helper functions for shape manipulation
+  const upsertShapeLocal = useCallback((s: Shape) => {
+    setShapes(prev => {
+      const m = new Map(prev);
+      m.set(s.id, s);
+      return m;
+    });
+  }, []);
+  
+  const removeShapeLocal = useCallback((id: string) => {
+    setShapes(prev => {
+      const m = new Map(prev);
+      m.delete(id);
+      return m;
+    });
+  }, []);
+
   // AI: Add shapes to selection
   const aiAddToSelection = useCallback((shapeIds: string[]) => {
     const validIds = shapeIds.filter(id => shapesRef.current.has(id));
@@ -1443,6 +1666,340 @@ export default function CanvasViewport({ userId }: Props) {
     setSelectedIds(new Set());
     return { success: true };
   }, []);
+
+  // AI: Create shape
+  const aiCreateShape = useCallback(async (params: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    sides?: number;
+    stroke?: string;
+    fill?: string | null;
+    text_md?: string;
+    text_color?: string;
+  }) => {
+    if (!wordlists) {
+      return { success: false, error: 'Wordlists not loaded' };
+    }
+
+    const id = crypto.randomUUID();
+    const name = randomName(wordlists.adjs, wordlists.nouns);
+    const shape: Shape = {
+      id,
+      created_by: userId,
+      x: Math.round(params.x),
+      y: Math.round(params.y),
+      width: Math.round(params.width),
+      height: Math.round(params.height),
+      stroke: params.stroke || "#000000",
+      stroke_width: 2,
+      fill: params.fill !== undefined ? params.fill : "#ffffff",
+      sides: params.sides !== undefined ? params.sides : 4,
+      rotation: 0,
+      z: frontZ(),
+      name,
+      text_md: params.text_md,
+      text_color: params.text_color || "#000000",
+      updated_at: nowIso(),
+    };
+
+    upsertShapeLocal(shape);
+    shapesChRef.current?.send({ type: "broadcast", event: "shape-create", payload: shape });
+    
+    const { error } = await supabase.from("shapes").insert(shape);
+    if (error) {
+      console.warn("AI: Shape creation failed:", error);
+      removeShapeLocal(id);
+      return { success: false, error: error.message };
+    }
+
+    return { success: true, shapeId: id, shapeName: name };
+  }, [wordlists, userId, frontZ, upsertShapeLocal, removeShapeLocal]);
+
+  // AI: Create multiple shapes in batch
+  const aiCreateShapes = useCallback(async (shapesList: Array<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    sides?: number;
+    stroke?: string;
+    fill?: string | null;
+    text_md?: string;
+    text_color?: string;
+  }>) => {
+    if (!wordlists) {
+      return { success: false, error: 'Wordlists not loaded' };
+    }
+
+    const createdShapes: Shape[] = [];
+    const usedNames = new Set<string>();
+
+    // Generate all shapes
+    for (const params of shapesList) {
+      let name = randomName(wordlists.adjs, wordlists.nouns);
+      // Ensure unique names
+      while (usedNames.has(name)) {
+        name = randomName(wordlists.adjs, wordlists.nouns);
+      }
+      usedNames.add(name);
+
+      const shape: Shape = {
+        id: crypto.randomUUID(),
+        created_by: userId,
+        x: Math.round(params.x),
+        y: Math.round(params.y),
+        width: Math.round(params.width),
+        height: Math.round(params.height),
+        stroke: params.stroke || "#000000",
+        stroke_width: 2,
+        fill: params.fill !== undefined ? params.fill : "#ffffff",
+        sides: params.sides !== undefined ? params.sides : 4,
+        rotation: 0,
+        z: frontZ(),
+        name,
+        text_md: params.text_md,
+        text_color: params.text_color || "#000000",
+        updated_at: nowIso(),
+      };
+      createdShapes.push(shape);
+    }
+
+    // Update local state
+    for (const shape of createdShapes) {
+      upsertShapeLocal(shape);
+      shapesChRef.current?.send({ type: "broadcast", event: "shape-create", payload: shape });
+    }
+
+    // Batch insert to DB
+    const { error } = await supabase.from("shapes").insert(createdShapes);
+    if (error) {
+      console.warn("AI: Batch shape creation failed:", error);
+      // Rollback
+      for (const shape of createdShapes) {
+        removeShapeLocal(shape.id);
+      }
+      return { success: false, error: error.message };
+    }
+
+    return { 
+      success: true, 
+      count: createdShapes.length,
+      shapeIds: createdShapes.map(s => s.id),
+      shapeNames: createdShapes.map(s => s.name),
+    };
+  }, [wordlists, userId, frontZ, upsertShapeLocal, removeShapeLocal]);
+
+  // AI: Delete shapes
+  const aiDeleteShapes = useCallback(async (shapeIds: string[]) => {
+    const validIds = shapeIds.filter(id => shapesRef.current.has(id));
+    if (validIds.length === 0) {
+      return { success: false, error: 'No valid shapes found' };
+    }
+
+    const toRestore = validIds.map(id => shapesRef.current.get(id)).filter(Boolean) as Shape[];
+    
+    // Optimistic delete
+    setShapes(prev => {
+      const m = new Map(prev);
+      validIds.forEach(id => m.delete(id));
+      return m;
+    });
+
+    // Broadcast
+    for (const id of validIds) {
+      shapesChRef.current?.send({ type: "broadcast", event: "shape-delete", payload: { id } });
+    }
+
+    // DB delete
+    const { error } = await supabase.from("shapes").delete().in("id", validIds);
+    if (error) {
+      console.warn("AI: Delete failed:", error);
+      // Rollback
+      setShapes(prev => {
+        const m = new Map(prev);
+        toRestore.forEach(s => m.set(s.id, s));
+        return m;
+      });
+      return { success: false, error: error.message };
+    }
+
+    // Clear selection if deleted shapes were selected
+    setSelectedIds(prev => {
+      const newSet = new Set(prev);
+      validIds.forEach(id => newSet.delete(id));
+      return newSet;
+    });
+
+    return { success: true, deletedCount: validIds.length };
+  }, []);
+
+  // AI: Open/close/toggle shape property modal
+  const aiToggleShapeModal = useCallback((action: 'open' | 'close' | 'toggle', shapeId?: string) => {
+    if (action === 'close') {
+      setModalShapeId(null);
+      return { success: true, isOpen: false };
+    }
+    
+    if (action === 'toggle') {
+      if (modalShapeId) {
+        setModalShapeId(null);
+        return { success: true, isOpen: false };
+      } else if (shapeId && shapesRef.current.has(shapeId)) {
+        setModalShapeId(shapeId);
+        return { success: true, isOpen: true, shapeId };
+      } else {
+        return { success: false, error: 'No shape specified for toggle' };
+      }
+    }
+    
+    if (action === 'open') {
+      if (!shapeId) {
+        return { success: false, error: 'Shape ID required to open modal' };
+      }
+      if (!shapesRef.current.has(shapeId)) {
+        return { success: false, error: 'Shape not found' };
+      }
+      setModalShapeId(shapeId);
+      return { success: true, isOpen: true, shapeId };
+    }
+
+    return { success: false, error: 'Invalid action' };
+  }, [modalShapeId]);
+
+  // AI: Toggle debug HUD
+  const aiToggleDebugHUD = useCallback((action: 'show' | 'hide' | 'toggle') => {
+    if (action === 'show') {
+      setShowDebug(true);
+      return { success: true, isVisible: true };
+    } else if (action === 'hide') {
+      setShowDebug(false);
+      return { success: true, isVisible: false };
+    } else {
+      setShowDebug(prev => !prev);
+      return { success: true, isVisible: !showDebug };
+    }
+  }, [showDebug]);
+
+  // AI: Toggle canvas menu
+  const aiToggleCanvasMenu = useCallback((action: 'show' | 'hide' | 'toggle', tab?: 'export' | 'versions') => {
+    if (action === 'show') {
+      setShowCanvasMenu(true);
+      if (tab) setCanvasMenuTab(tab);
+      return { success: true, isOpen: true };
+    } else if (action === 'hide') {
+      setShowCanvasMenu(false);
+      return { success: true, isOpen: false };
+    } else {
+      setShowCanvasMenu(prev => !prev);
+      if (tab) setCanvasMenuTab(tab);
+      return { success: true, isOpen: !showCanvasMenu };
+    }
+  }, [showCanvasMenu]);
+
+  // AI: Download PNG
+  const aiDownloadPNG = useCallback(() => {
+    exportAsPNG();
+    return { success: true };
+  }, [exportAsPNG]);
+
+  // AI: Download SVG
+  const aiDownloadSVG = useCallback(() => {
+    exportAsSVG();
+    return { success: true };
+  }, [exportAsSVG]);
+
+  // AI: Download JSON
+  const aiDownloadJSON = useCallback(() => {
+    exportAsJSON();
+    return { success: true };
+  }, [exportAsJSON]);
+
+  // AI: Save version
+  const aiSaveVersion = useCallback(async () => {
+    const result = await saveCanvasVersion();
+    return { success: result !== false };
+  }, [saveCanvasVersion]);
+
+  // AI: Restore version
+  const aiRestoreVersion = useCallback(async (identifier: string | number) => {
+    // Handle different identifier types
+    let versionToRestore: CanvasVersion | undefined;
+
+    if (typeof identifier === 'string') {
+      // Try to match by date/time string or version ID
+      versionToRestore = canvasVersions.find(v => 
+        v.id === identifier || 
+        v.created_at.includes(identifier) ||
+        new Date(v.created_at).toLocaleString().includes(identifier)
+      );
+    } else if (typeof identifier === 'number') {
+      // Handle "last version", "5 versions ago", etc.
+      const index = identifier;
+      if (index >= 0 && index < canvasVersions.length) {
+        versionToRestore = canvasVersions[index];
+      }
+    }
+
+    if (!versionToRestore) {
+      return { success: false, error: 'Version not found' };
+    }
+
+    const result = await restoreCanvasVersion(versionToRestore.id);
+    return { success: result, versionId: versionToRestore.id };
+  }, [canvasVersions, restoreCanvasVersion]);
+
+  // AI: Set zoom level (optionally with pan to focus point)
+  const aiSetZoom = useCallback((zoomLevel: number, focusX?: number, focusY?: number) => {
+    // Clamp zoom level to reasonable bounds (10% to 500%)
+    const clampedZoom = Math.max(0.1, Math.min(5.0, zoomLevel));
+    
+    // If focus point provided, adjust offset to keep that point centered
+    if (focusX !== undefined && focusY !== undefined) {
+      const svg = svgRef.current;
+      if (svg) {
+        const rect = svg.getBoundingClientRect();
+        const viewportCenterX = rect.width / 2;
+        const viewportCenterY = rect.height / 2;
+        
+        // Calculate new offset to keep focus point at viewport center
+        const newOffsetX = focusX - viewportCenterX / clampedZoom;
+        const newOffsetY = focusY - viewportCenterY / clampedZoom;
+        
+        setOffset({ x: newOffsetX, y: newOffsetY });
+      }
+    }
+    
+    setScale(clampedZoom);
+    schedulePublish(); // Broadcast zoom and pan change to other users
+    return { success: true, zoom: clampedZoom, focusX, focusY };
+  }, [schedulePublish]);
+
+  // AI: Get current pan/scroll position
+  const aiGetViewport = useCallback(() => {
+    const svg = svgRef.current;
+    const rect = svg?.getBoundingClientRect();
+    const centerX = offset.x + (rect?.width ?? 0) / 2 / scale;
+    const centerY = offset.y + (rect?.height ?? 0) / 2 / scale;
+    
+    return {
+      offsetX: offset.x,
+      offsetY: offset.y,
+      centerX,
+      centerY,
+      zoom: scale,
+      viewportWidth: rect?.width ?? 0,
+      viewportHeight: rect?.height ?? 0,
+    };
+  }, [offset, scale]);
+
+  // AI: Set pan position (scroll)
+  const aiSetPan = useCallback((x: number, y: number) => {
+    setOffset({ x, y });
+    schedulePublish();
+    return { success: true, offsetX: x, offsetY: y };
+  }, [schedulePublish]);
 
   const onMouseUpRoot = (e: React.MouseEvent<HTMLDivElement>) => { 
     // Handle right mouse button up
@@ -1511,32 +2068,6 @@ export default function CanvasViewport({ userId }: Props) {
     arr.sort(shapeOrderCmp);
     return arr;
   }, [shapes]);
-
-  const upsertShapeLocal = useCallback((s: Shape) => {
-    setShapes(prev => {
-      const m = new Map(prev);
-      m.set(s.id, s);
-      return m;
-    });
-  }, []);
-  const removeShapeLocal = useCallback((id: string) => {
-    setShapes(prev => {
-      const m = new Map(prev);
-      m.delete(id);
-      return m;
-    });
-  }, []);
-
-  const frontZ = () => {
-    const values = Array.from(shapesRef.current.values());
-    const maxZ = values.length ? Math.max(...values.map(s => s.z ?? 0)) : 0;
-    return Math.floor(maxZ) + 1;
-    };
-  const backZ = () => {
-    const values = Array.from(shapesRef.current.values());
-    const minZ = values.length ? Math.min(...values.map(s => s.z ?? 0)) : 0;
-    return Math.ceil(minZ) - 1;
-  };
 
   // Live-sync
   const shapesChRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
@@ -3474,12 +4005,30 @@ export default function CanvasViewport({ userId }: Props) {
           getCanvasJSON={encodeCanvasToJSON}
           getSelectedShapeIds={getSelectedShapeIds}
           getUserCursors={getUserCursors}
+          getUIState={getUIState}
+          aiGetViewport={aiGetViewport}
           aiUpdateShapeProperties={aiUpdateShapeProperties}
           aiRenameShape={aiRenameShape}
           aiAddAnnotation={aiAddAnnotation}
           aiAddToSelection={aiAddToSelection}
           aiRemoveFromSelection={aiRemoveFromSelection}
           aiClearSelection={aiClearSelection}
+          aiCreateShape={aiCreateShape}
+          aiDeleteShapes={aiDeleteShapes}
+          aiToggleShapeModal={aiToggleShapeModal}
+          aiToggleDebugHUD={aiToggleDebugHUD}
+          aiToggleCanvasMenu={aiToggleCanvasMenu}
+          aiDownloadPNG={aiDownloadPNG}
+          aiDownloadSVG={aiDownloadSVG}
+          aiDownloadJSON={aiDownloadJSON}
+          aiSaveVersion={aiSaveVersion}
+          aiRestoreVersion={aiRestoreVersion}
+          aiSetZoom={aiSetZoom}
+          aiSetPan={aiSetPan}
+          aiCreateShapes={aiCreateShapes}
+          aiAddAnnotations={aiAddAnnotations}
+          aiUpdateShapesProperties={aiUpdateShapesProperties}
+          aiUpdateSelectionProperties={aiUpdateSelectionProperties}
         />
       </Portal>
     </div>

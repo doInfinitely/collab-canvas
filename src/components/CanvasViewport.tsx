@@ -36,6 +36,8 @@ type Annotation = {
   created_at: string;
 };
 
+type ShapeAnnotationInsert = Pick<Annotation, "id" | "shape_id" | "user_id" | "text" | "created_at">;
+
 type CanvasVersion = {
   id: string;
   created_at: string;
@@ -545,7 +547,7 @@ export default function CanvasViewport({ userId }: Props) {
       if (!taken.has(name.toLowerCase())) return name;
     }
     // Worst case: append a number
-    let base = toName(adjs[lcg() % adjs.length], nouns[lcg() % nouns.length]);
+    const base = toName(adjs[lcg() % adjs.length], nouns[lcg() % nouns.length]);
     let k = 2;
     while (taken.has(`${base}${k}`.toLowerCase())) k++;
     return `${base}${k}`;
@@ -2102,7 +2104,7 @@ export default function CanvasViewport({ userId }: Props) {
       : [modalShapeId];
 
     const now = nowIso();
-    const anns = targetIds.map((shapeId) => ({
+    const anns: ShapeAnnotationInsert[] = targetIds.map((shapeId) => ({
       id: (typeof crypto !== "undefined" && "randomUUID" in crypto)
         ? crypto.randomUUID()
         : `ann_${Math.random().toString(36).slice(2)}`,
@@ -2110,7 +2112,7 @@ export default function CanvasViewport({ userId }: Props) {
       user_id: userId,
       text,
       created_at: now,
-    })) as Annotation[];
+    }));
 
     setAnnotationsByShape(prev => {
       const m = new Map(prev);
@@ -2131,7 +2133,7 @@ export default function CanvasViewport({ userId }: Props) {
       });
     }
 
-    const { error } = await supabase.from("shape_annotations").insert(anns as any);
+    const { error } = await supabase.from("shape_annotations").insert(anns);
     if (error) {
       console.warn("Annotation insert failed:", error.message);
       setAnnotationsByShape(prev => {

@@ -24,6 +24,7 @@ type Shape = {
   z?: number;
 
   name?: string; // NEW
+  text_md?: string;
 };
 
 type Annotation = {
@@ -220,6 +221,35 @@ const nearPerimeter = (s: Shape, wx: number, wy: number, threshWorld: number) =>
   return dmin <= threshWorld;
 };
 
+const renderMarkdown = (text: string) => {
+  if (!text) return "";
+  let html = text;
+  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/__(.+?)__/g, '<strong>$1</strong>');
+  html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+  html = html.replace(/_(.+?)_/g, '<em>$1</em>');
+  html = html.replace(/`(.+?)`/g, '<code style="background:#f3f4f6;padding:2px 4px;border-radius:3px;font-family:monospace;font-size:0.9em">$1</code>');
+  html = html.replace(/\n/g, '<br>');
+  return html;
+};
+
+const getTextBoxBounds = (s: Shape) => {
+  const rx = Math.abs(s.width) / 2;
+  const ry = Math.abs(s.height) / 2;
+  const factor = 0.7;
+  const boxW = rx * 2 * factor;
+  const boxH = ry * 2 * factor;
+  return { boxW, boxH };
+};
+
+const pointInTextBox = (s: Shape, wx: number, wy: number) => {
+  const { cx, cy } = shapeCenter(s);
+  const { boxW, boxH } = getTextBoxBounds(s);
+  const dx = Math.abs(wx - cx);
+  const dy = Math.abs(wy - cy);
+  return dx <= boxW / 2 && dy <= boxH / 2;
+};
+
 export default function CanvasViewport({ userId }: Props) {
   // ===== camera & cursors =====
   const [offset, setOffset] = useState({ x: 0, y: 0 });
@@ -249,6 +279,12 @@ export default function CanvasViewport({ userId }: Props) {
   }>(null);
 
   const clipboardRef = useRef<Shape[] | null>(null);
+  const dblClickRef = useRef(false);
+
+  const [editingTextId, setEditingTextId] = useState<string | null>(null);
+  const [editingText, setEditingText] = useState("");
+  const textDebounceRef = useRef<NodeJS.Timeout | null>(null);
+  const clickStartRef = useRef<{ x: number; y: number; shapeId: string | null } | null>(null);
 
   // Modal state
   const [modalShapeId, setModalShapeId] = useState<string | null>(null);
@@ -750,6 +786,16 @@ export default function CanvasViewport({ userId }: Props) {
       });
     });
 
+    ch.on("broadcast", { event: "shape-text" }, ({ payload }: { payload: { id: string; text_md: string; updated_at?: string } }) => {
+      setShapes(prev => {
+        const m = new Map(prev);
+        const s = m.get(payload.id);
+        if (!s) return prev;
+        m.set(payload.id, { ...s, text_md: payload.text_md, updated_at: payload.updated_at ?? s.updated_at });
+        return m;
+      });
+    });
+
     ch.subscribe();
     return () => {
       try { ch.unsubscribe(); } catch {}
@@ -924,11 +970,11 @@ export default function CanvasViewport({ userId }: Props) {
   // ===== Mouse handlers (left) =====
   const onLeftDown = useCallback((e: React.MouseEvent<SVGSVGElement>) => {
     if (e.button !== 0) return;
+    const { wx, wy } = worldFromSvgEvent(e);
 
     // perimeter first (resize/rotate)
     const peri = pickPerimeter(e);
     if (peri) {
-      const { wx, wy } = worldFromSvgEvent(e);
       if (e.metaKey || e.ctrlKey) {
         const { cx, cy } = shapeCenter(peri);
         const ang0 = Math.atan2(wy - cy, wx - cx);
@@ -983,7 +1029,9 @@ export default function CanvasViewport({ userId }: Props) {
     // inside shape: move/selection
     const picked = pickShapeEvt(e);
     if (picked) {
-      const { wx, wy } = worldFromSvgEvent(e);
+      // Store click start for potential text editing
+      clickStartRef.current = { x: e.clientX, y: e.clientY, shapeId: picked.id };
+      
       if (e.shiftKey) { addToSelection(picked.id); return; }
       if (selectedIds.has(picked.id)) {
         multiDragRef.current = {
@@ -1002,7 +1050,6 @@ export default function CanvasViewport({ userId }: Props) {
     }
 
     // background: marquee (shift) or create
-    const { wx, wy } = worldFromSvgEvent(e);
     if (e.shiftKey) {
       setMarquee({ startX: wx, startY: wy, curX: wx, curY: wy });
       return;
@@ -1028,6 +1075,16 @@ export default function CanvasViewport({ userId }: Props) {
 
   const onLeftMove = useCallback((e: React.MouseEvent<SVGSVGElement>) => {
     const { wx, wy } = worldFromSvgEvent(e);
+    
+    // Track movement for click detection
+    /*
+    if (clickStartRef.current) {
+      const dx = Math.abs(e.clientX - clickStartRef.current.x);
+      const dy = Math.abs(e.clientY - clickStartRef.current.y);
+      if (dx > 5 || dy > 5) {
+        clickStartRef.current = null;
+      }
+    }*/
 
     if (marquee) { setMarquee(m => (m ? { ...m, curX: wx, curY: wy } : m)); return; }
 
@@ -1145,7 +1202,38 @@ export default function CanvasViewport({ userId }: Props) {
     }
   }, [drag, marquee, worldFromSvgEvent]);
 
-  const onLeftUp = useCallback(async () => {
+  const onLeftUp = useCallback(async (e: React.MouseEvent<SVGSVGElement>) => {
+    // Check for text click FIRST (only if it was a click, not a drag)
+    if (clickStartRef.current && drag.kind === "moving") {
+      const dx = Math.abs(e.clientX - clickStartRef.current.x);
+      const dy = Math.abs(e.clientY - clickStartRef.current.y);
+      
+      // If mouse barely moved, treat as click not drag
+      if (dx < 5 && dy < 5 && clickStartRef.current.shapeId) {
+        const s = shapesRef.current.get(clickStartRef.current.shapeId);
+        if (s) {
+          const { wx, wy } = worldFromSvgEvent(e);
+          // Check if click was in text box area
+          if (pointInTextBox(s, wx, wy)) {
+            // Delay text editing to allow double-click to fire
+            const shapeId = s.id;
+            const textContent = s.text_md || "";
+            setTimeout(() => {
+              if (!dblClickRef.current) {
+                setEditingTextId(shapeId);
+                setEditingText(textContent);
+              }
+            }, 250); // Wait 250ms to see if double-click happens
+            
+            setDrag({ kind: "none" }); // Cancel the drag
+            clickStartRef.current = null;
+            return;
+          }
+        }
+      }
+      clickStartRef.current = null;
+    }
+
     if (marquee) {
       const { startX, startY, curX, curY } = marquee;
       const minX = Math.min(startX, curX), maxX = Math.max(startX, curX);
@@ -1180,7 +1268,7 @@ export default function CanvasViewport({ userId }: Props) {
           x: nx, y: ny, width: nw, height: nh,
           stroke: "#000000", stroke_width: 2, fill: "#ffffff",
           updated_at: nowIso(), sides: 4, rotation: 0, z: frontZ(),
-          name, // NEW
+          name,
         };
         upsertShapeLocal(shape);
         shapesChRef.current?.send({ type: "broadcast", event: "shape-create", payload: shape });
@@ -1193,10 +1281,12 @@ export default function CanvasViewport({ userId }: Props) {
     if (drag.kind === "moving" || drag.kind === "resizing" || drag.kind === "rotating") {
       setDrag({ kind: "none" });
     }
-  }, [drag, marquee, shapes, userId, upsertShapeLocal, removeShapeLocal]);
+  }, [drag, marquee, shapes, userId, upsertShapeLocal, removeShapeLocal, worldFromSvgEvent, wordlists]);
 
   // ===== Double-click delete =====
   const onDoubleClickSVG = useCallback(async (e: React.MouseEvent<SVGSVGElement>) => {
+    dblClickRef.current = true; // Mark that double-click happened
+    
     if (drag.kind !== "none") return;
     const hit = pickShapeEvt(e);
     if (!hit) return;
@@ -1211,6 +1301,11 @@ export default function CanvasViewport({ userId }: Props) {
     } else {
       setSelectedIds(new Set());
     }
+    
+    // Clear the flag after a short delay
+    setTimeout(() => {
+      dblClickRef.current = false;
+    }, 300);
   }, [drag, pickShapeEvt, selectedIds]);
 
   // ===== COPY / CUT / PASTE =====
@@ -1304,6 +1399,43 @@ export default function CanvasViewport({ userId }: Props) {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [doCopy, doCut, doPaste]);
+
+  const handleTextChange = useCallback((text: string) => {
+    setEditingText(text);
+    
+    if (textDebounceRef.current) clearTimeout(textDebounceRef.current);
+    
+    textDebounceRef.current = setTimeout(() => {
+      if (!editingTextId) return;
+      
+      const now = nowIso();
+      setShapes(prev => {
+        const m = new Map(prev);
+        const s = m.get(editingTextId);
+        if (!s) return prev;
+        m.set(editingTextId, { ...s, text_md: text, updated_at: now });
+        return m;
+      });
+
+      shapesChRef.current?.send({
+        type: "broadcast",
+        event: "shape-text",
+        payload: { id: editingTextId, text_md: text, updated_at: now }
+      });
+
+      (async () => {
+        await supabase.from("shapes").update({ text_md: text, updated_at: now }).eq("id", editingTextId);
+      })();
+    }, 250);
+  }, [editingTextId]);
+
+  const handleTextBlur = useCallback(() => {
+    if (textDebounceRef.current) {
+      clearTimeout(textDebounceRef.current);
+      textDebounceRef.current = null;
+    }
+    setEditingTextId(null);
+  }, []);
 
   // ===== Annotations (broadcast + DB) =====
   const [annotationsByShape, setAnnotationsByShape] = useState<Map<string, Annotation[]>>(new Map());
@@ -1724,7 +1856,61 @@ export default function CanvasViewport({ userId }: Props) {
           );
         })()}
       </svg>
-
+      {/* Text boxes overlay */}
+      <div className="absolute inset-0 pointer-events-none">
+        {shapeOrdered.map((s) => {
+          const { cx, cy } = shapeCenter(s);
+          const { boxW, boxH } = getTextBoxBounds(s);
+          
+          const screenX = (cx - offset.x) * scale;
+          const screenY = (cy - offset.y) * scale;
+          const screenW = boxW * scale;
+          const screenH = boxH * scale;
+          
+          const isEditing = editingTextId === s.id;
+          
+          return (
+            <div
+              key={`text-${s.id}`}
+              className="absolute"
+              style={{
+                left: screenX - screenW / 2,
+                top: screenY - screenH / 2,
+                width: screenW,
+                height: screenH,
+                pointerEvents: isEditing ? 'auto' : 'none', // Only capture events when editing
+              }}
+            >
+              {isEditing ? (
+                <textarea
+                  className="w-full h-full p-2 text-sm border-2 border-blue-500 rounded bg-white resize-none outline-none"
+                  style={{ fontSize: Math.max(10, 14 * scale) }}
+                  value={editingText}
+                  onChange={(e) => handleTextChange(e.target.value)}
+                  onBlur={handleTextBlur}
+                  autoFocus
+                  onClick={(e) => e.stopPropagation()}
+                  onMouseDown={(e) => e.stopPropagation()}
+                />
+              ) : (
+                <div
+                  className="w-full h-full p-2 overflow-auto rounded"
+                  style={{ 
+                    fontSize: Math.max(10, 14 * scale),
+                    pointerEvents: 'none', // Let clicks pass through to SVG
+                  }}
+                >
+                  {s.text_md ? (
+                    <div dangerouslySetInnerHTML={{ __html: renderMarkdown(s.text_md) }} />
+                  ) : (
+                    <div className="text-gray-400 text-xs opacity-50">Click to add text</div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
       {/* Multiplayer cursors */}
       <div className="absolute inset-0 pointer-events-none">
         {Array.from(remoteCursors.entries()).map(([uid, rc]) => {
@@ -2103,7 +2289,7 @@ export default function CanvasViewport({ userId }: Props) {
           <div>cursorΔ: ({Math.round(cursor.dx)}, {Math.round(cursor.dy)})</div>
           <div>sum: ({Math.round(offset.x + cursor.dx)}, {Math.round(offset.y + cursor.dy)})</div>
           <div className="opacity-60">
-            Wheel pan • RMB pan • Ctrl/Cmd+Wheel zoom • LMB create/move • Perimeter drag = resize • Cmd/Ctrl+Perimeter drag = rotate • Dbl-click delete (sel=all) • Shift+Click select • Shift+Drag (bg) marquee • Cmd/Ctrl+C/X/V • RMB on shape → Properties • ? toggles HUD
+            Wheel pan • RMB pan • Ctrl/Cmd+Wheel zoom • LMB create/move • Perimeter drag = resize • Cmd/Ctrl+Perimeter drag = rotate • Dbl-click delete (sel=all) • Shift+Click select • Shift+Drag (bg) marquee • Cmd/Ctrl+C/X/V • RMB on shape → Properties • Click text to edit • ? toggles HUD
           </div>
         </div>
       )}

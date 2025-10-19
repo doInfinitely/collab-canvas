@@ -46,6 +46,7 @@ import { usePresence } from "@/hooks/canvas/usePresence";
 import { useAnnotations } from "@/hooks/canvas/useAnnotations";
 import { useCanvasVersioning } from "@/hooks/canvas/useCanvasVersioning";
 import { useKeyboardShortcuts } from "@/hooks/canvas/useKeyboardShortcuts";
+import { usePanZoom } from "@/hooks/canvas/usePanZoom";
 
 type Props = { userId: string };
 
@@ -446,93 +447,6 @@ export default function CanvasViewport({ userId }: Props) {
     }
   };
 
-  const onWheel = (e: WheelEvent) => {
-    e.preventDefault();
-    if (e.ctrlKey || e.metaKey) {
-      const zoomIntensity = 0.0015;
-      const old = scaleRef.current;
-      const next = Math.min(4, Math.max(0.2, old * Math.exp(-e.deltaY * zoomIntensity)));
-      const cx = e.clientX, cy = e.clientY;
-      const worldX = offsetRef.current.x + cx / old;
-      const worldY = offsetRef.current.y + cy / old;
-      setScale(next);
-      setOffset({ x: worldX - cx / next, y: worldY - cy / next });
-    } else {
-      setOffset((o) => ({
-        x: o.x + e.deltaX / scaleRef.current,
-        y: o.y + e.deltaY / scaleRef.current,
-      }));
-    }
-    schedulePublish();
-  };
-
-  // Attach wheel event listener with passive: false to allow preventDefault
-  useEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
-
-    container.addEventListener('wheel', onWheel, { passive: false });
-
-    return () => {
-      container.removeEventListener('wheel', onWheel);
-    };
-  }, []);
-
-  // ===== AI Pan to Coordinate =====
-  const panToCoordinate = useCallback((targetX: number, targetY: number) => {
-    const svg = svgRef.current;
-    if (!svg) return;
-
-    const rect = svg.getBoundingClientRect();
-    const viewportCenterX = rect.width / 2;
-    const viewportCenterY = rect.height / 2;
-
-    // Current center in world coordinates
-    const currentCenterX = offsetRef.current.x + viewportCenterX / scaleRef.current;
-    const currentCenterY = offsetRef.current.y + viewportCenterY / scaleRef.current;
-
-    // Calculate distance
-    const dx = targetX - currentCenterX;
-    const dy = targetY - currentCenterY;
-    const distance = Math.sqrt(dx * dx + dy * dy);
-
-    // Target offset to center on the coordinate
-    const targetOffsetX = targetX - viewportCenterX / scaleRef.current;
-    const targetOffsetY = targetY - viewportCenterY / scaleRef.current;
-
-    // If distance is large (> 2000px), instant jump
-    if (distance > 2000) {
-      setOffset({ x: targetOffsetX, y: targetOffsetY });
-      schedulePublish();
-      return;
-    }
-
-    // Otherwise, smooth animation
-    const startOffset = { ...offsetRef.current };
-    const startTime = Date.now();
-    const duration = 600; // 600ms animation
-
-    const animate = () => {
-      const elapsed = Date.now() - startTime;
-      const progress = Math.min(elapsed / duration, 1);
-      
-      // Ease out cubic
-      const easeProgress = 1 - Math.pow(1 - progress, 3);
-
-      const currentX = startOffset.x + (targetOffsetX - startOffset.x) * easeProgress;
-      const currentY = startOffset.y + (targetOffsetY - startOffset.y) * easeProgress;
-
-      setOffset({ x: currentX, y: currentY });
-
-      if (progress < 1) {
-        requestAnimationFrame(animate);
-      } else {
-        schedulePublish();
-      }
-    };
-
-    requestAnimationFrame(animate);
-  }, [schedulePublish]);
 
   // ===== AI Helper Functions =====
   const getSelectedShapeIds = useCallback(() => {
@@ -1065,56 +979,6 @@ export default function CanvasViewport({ userId }: Props) {
     }
   }, [showCanvasMenu]);
 
-  // AI: Set zoom level (optionally with pan to focus point)
-  const aiSetZoom = useCallback((zoomLevel: number, focusX?: number, focusY?: number) => {
-    // Clamp zoom level to reasonable bounds (10% to 500%)
-    const clampedZoom = Math.max(0.1, Math.min(5.0, zoomLevel));
-    
-    // If focus point provided, adjust offset to keep that point centered
-    if (focusX !== undefined && focusY !== undefined) {
-      const svg = svgRef.current;
-      if (svg) {
-        const rect = svg.getBoundingClientRect();
-        const viewportCenterX = rect.width / 2;
-        const viewportCenterY = rect.height / 2;
-        
-        // Calculate new offset to keep focus point at viewport center
-        const newOffsetX = focusX - viewportCenterX / clampedZoom;
-        const newOffsetY = focusY - viewportCenterY / clampedZoom;
-        
-        setOffset({ x: newOffsetX, y: newOffsetY });
-      }
-    }
-    
-    setScale(clampedZoom);
-    schedulePublish(); // Broadcast zoom and pan change to other users
-    return { success: true, zoom: clampedZoom, focusX, focusY };
-  }, [schedulePublish]);
-
-  // AI: Get current pan/scroll position
-  const aiGetViewport = useCallback(() => {
-    const svg = svgRef.current;
-    const rect = svg?.getBoundingClientRect();
-    const centerX = offset.x + (rect?.width ?? 0) / 2 / scale;
-    const centerY = offset.y + (rect?.height ?? 0) / 2 / scale;
-    
-    return {
-      offsetX: offset.x,
-      offsetY: offset.y,
-      centerX,
-      centerY,
-      zoom: scale,
-      viewportWidth: rect?.width ?? 0,
-      viewportHeight: rect?.height ?? 0,
-    };
-  }, [offset, scale]);
-
-  // AI: Set pan position (scroll)
-  const aiSetPan = useCallback((x: number, y: number) => {
-    setOffset({ x, y });
-    schedulePublish();
-    return { success: true, offsetX: x, offsetY: y };
-  }, [schedulePublish]);
 
   const onMouseUpRoot = (e: React.MouseEvent<HTMLDivElement>) => { 
     // Handle right mouse button up
@@ -1377,6 +1241,24 @@ export default function CanvasViewport({ userId }: Props) {
     setSelectedIds,
     setShowDebug,
     setShowCanvasMenu,
+  });
+
+  // ===== pan/zoom hook =====
+  const {
+    panToCoordinate,
+    aiSetZoom,
+    aiGetViewport,
+    aiSetPan,
+  } = usePanZoom({
+    containerRef,
+    svgRef,
+    offsetRef,
+    scaleRef,
+    setOffset,
+    setScale,
+    offset,
+    scale,
+    schedulePublish,
   });
 
   // AI: Restore version

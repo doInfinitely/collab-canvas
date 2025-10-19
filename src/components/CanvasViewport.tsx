@@ -6,6 +6,31 @@ import { supabase } from "@/lib/supabase/client";
 import Portal from "@/components/Portal";
 import ChatBox from "@/components/ChatBox";
 
+// Utility imports
+import { 
+  HEX_RE, 
+  HEX6, 
+  normalizeHex, 
+  hexToRgb, 
+  rgbToHex, 
+  rgbToHsv, 
+  hsvToRgb, 
+  hsvToHex,
+  colorFor 
+} from "@/lib/canvas/colors";
+import { clamp, nowIso, deg, resolveSides } from "@/lib/canvas/shapes";
+import { renderMarkdown, escapeXML } from "@/lib/canvas/markdown";
+import {
+  polygonPoints,
+  shapeCenter,
+  worldToLocal,
+  pointInShape,
+  nearPerimeter,
+  getTextBoxBounds,
+  pointInTextBox,
+  nearCorner
+} from "@/lib/canvas/geometry";
+
 type Props = { userId: string };
 
 type Shape = {
@@ -52,352 +77,11 @@ const GRID_SIZE = 24;
 const DOT_RADIUS = 1.5;
 const DOT_COLOR = "#9ca3af";
 
+// getTabId helper for presence tracking
 function getTabId() {
   try { return crypto.randomUUID(); }
   catch { return `tab_${Math.random().toString(36).slice(2)}`; }
 }
-
-function colorFor(id: string) {
-  let h = 0;
-  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) % 360;
-  return `hsl(${h}, 75%, 45%)`;
-}
-
-const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
-const nowIso = () => new Date().toISOString();
-const deg = (rad: number) => (rad * 180) / Math.PI;
-const resolveSides = (n?: number) => (n === 0 || (typeof n === "number" && n >= 3)) ? n : 4;
-
-// ===== Color helpers =====
-const HEX_RE = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
-const HEX6 = /^#[0-9a-f]{6}$/i;
-
-const normalizeHex = (hex: string) => {
-  if (!HEX_RE.test(hex)) return null;
-  const h = hex.toLowerCase();
-  if (h.length === 4) return `#${h[1]}${h[1]}${h[2]}${h[2]}${h[3]}${h[3]}`;
-  return h;
-};
-
-const hexToRgb = (hex: string): { r: number; g: number; b: number } | null => {
-  const n = normalizeHex(hex);
-  if (!n) return null;
-  const r = parseInt(n.slice(1, 3), 16);
-  const g = parseInt(n.slice(3, 5), 16);
-  const b = parseInt(n.slice(5, 7), 16);
-  return { r, g, b };
-};
-
-const rgbToHex = (r: number, g: number, b: number) =>
-  `#${[r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("")}`;
-
-const rgbToHsv = (r: number, g: number, b: number) => {
-  r /= 255; g /= 255; b /= 255;
-  const max = Math.max(r, g, b), min = Math.min(r, g, b);
-  const d = max - min;
-  let h = 0;
-  if (d !== 0) {
-    switch (max) {
-      case r: h = ((g - b) / d) % 6; break;
-      case g: h = (b - r) / d + 2; break;
-      case b: h = (r - g) / d + 4; break;
-    }
-    h *= 60;
-    if (h < 0) h += 360;
-  }
-  const s = max === 0 ? 0 : d / max;
-  const v = max;
-  return { h, s, v };
-};
-
-const hsvToRgb = (h: number, s: number, v: number) => {
-  const c = v * s;
-  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
-  const m = v - c;
-  let r = 0, g = 0, b = 0;
-  if (0 <= h && h < 60) { r = c; g = x; }
-  else if (60 <= h && h < 120) { r = x; g = c; }
-  else if (120 <= h && h < 180) { g = c; b = x; }
-  else if (180 <= h && h < 240) { g = x; b = c; }
-  else if (240 <= h && h < 300) { r = x; b = c; }
-  else { r = c; b = x; }
-  return {
-    r: Math.round((r + m) * 255),
-    g: Math.round((g + m) * 255),
-    b: Math.round((b + m) * 255),
-  };
-};
-
-function hsvToHex(h: number, s: number, v: number) {
-  const { r, g, b } = hsvToRgb(h, s, v);
-  return rgbToHex(r, g, b);
-}
-
-// ===== geometry helpers =====
-const polygonPoints = (x: number, y: number, w: number, h: number, n: number) => {
-  const cx = x + w / 2;
-  const cy = y + h / 2;
-  const rx = Math.abs(w) / 2;
-  const ry = Math.abs(h) / 2;
-  const pts: string[] = [];
-  const start = -Math.PI / 2;
-  for (let i = 0; i < n; i++) {
-    const ang = start + (i * 2 * Math.PI) / n;
-    const px = cx + rx * Math.cos(ang);
-    const py = cy + ry * Math.sin(ang);
-    pts.push(`${px},${py}`);
-  }
-  return pts.join(" ");
-};
-
-const shapeCenter = (s: Shape) => ({ cx: s.x + s.width / 2, cy: s.y + s.height / 2 });
-
-const worldToLocal = (s: Shape, wx: number, wy: number) => {
-  const { cx, cy } = shapeCenter(s);
-  const theta = s.rotation ?? 0;
-  const dx = wx - cx;
-  const dy = wy - cy;
-  const c = Math.cos(-theta);
-  const si = Math.sin(-theta);
-  return { lx: dx * c - dy * si, ly: dx * si + dy * c };
-};
-
-const pointInShape = (s: Shape, wx: number, wy: number) => {
-  const sides = resolveSides(s.sides);
-  const { lx, ly } = worldToLocal(s, wx, wy);
-  const rx = Math.abs(s.width) / 2;
-  const ry = Math.abs(s.height) / 2;
-
-  if (sides === 4) return Math.abs(lx) <= rx && Math.abs(ly) <= ry;
-  if (sides === 0) return (lx * lx) / (rx * rx) + (ly * ly) / (ry * ry) <= 1;
-
-  const pts: Array<[number, number]> = [];
-  const start = -Math.PI / 2;
-  for (let i = 0; i < sides; i++) {
-    const ang = start + (i * 2 * Math.PI) / sides;
-    pts.push([rx * Math.cos(ang), ry * Math.sin(ang)]);
-  }
-  let inside = false;
-  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
-    const [xi, yi] = pts[i];
-    const [xj, yj] = pts[j];
-    const intersect = yi > ly !== yj > ly && lx < ((xj - xi) * (ly - yi)) / (yj - yi) + xi;
-    if (intersect) inside = !inside;
-  }
-  return inside;
-};
-
-const nearPerimeter = (s: Shape, wx: number, wy: number, threshWorld: number) => {
-  const sides = resolveSides(s.sides);
-  const { lx, ly } = worldToLocal(s, wx, wy);
-  const rx = Math.abs(s.width) / 2;
-  const ry = Math.abs(s.height) / 2;
-
-  if (sides === 4) {
-    const dx = Math.abs(Math.abs(lx) - rx);
-    const dy = Math.abs(Math.abs(ly) - ry);
-    const withinY = Math.abs(ly) <= ry + threshWorld;
-    const withinX = Math.abs(lx) <= rx + threshWorld;
-    const d = (withinY ? dx : Infinity) < (withinX ? dy : Infinity) ? dx : dy;
-    const outside = Math.abs(lx) > rx + threshWorld || Math.abs(ly) > ry + threshWorld;
-    return !outside && d <= threshWorld;
-  }
-
-  if (sides === 0) {
-    const rNorm = Math.sqrt((lx * lx) / (rx * rx) + (ly * ly) / (ry * ry));
-    const minR = Math.min(rx, ry);
-    const delta = Math.abs(rNorm - 1) * minR;
-    return delta <= threshWorld;
-  }
-
-  const pts: Array<[number, number]> = [];
-  const start = -Math.PI / 2;
-  for (let i = 0; i < sides; i++) {
-    const ang = start + (i * 2 * Math.PI) / sides;
-    pts.push([rx * Math.cos(ang), ry * Math.sin(ang)]);
-  }
-  const distPointSeg = (px: number, py: number, ax: number, ay: number, bx: number, by: number) => {
-    const abx = bx - ax, aby = by - ay;
-    const apx = px - ax, apy = py - ay;
-    const ab2 = abx * abx + aby * aby;
-    const t = Math.max(0, Math.min(1, (apx * abx + apy * aby) / (ab2 || 1)));
-    const cx = ax + t * abx, cy = ay + t * aby;
-    const dx = px - cx, dy = py - cy;
-    return Math.hypot(dx, dy);
-  };
-  let dmin = Infinity;
-  for (let i = 0; i < pts.length; i++) {
-    const a = pts[i], b = pts[(i + 1) % pts.length];
-    dmin = Math.min(dmin, distPointSeg(lx, ly, a[0], a[1], b[0], b[1]));
-  }
-  return dmin <= threshWorld;
-};
-
-const renderMarkdown = (text: string) => {
-  if (!text) return "";
-  let html = text;
-  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-  html = html.replace(/__(.+?)__/g, '<strong>$1</strong>');
-  html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
-  html = html.replace(/_(.+?)_/g, '<em>$1</em>');
-  html = html.replace(/`(.+?)`/g, '<code style="background:#f3f4f6;padding:2px 4px;border-radius:3px;font-family:monospace;font-size:0.9em">$1</code>');
-  html = html.replace(/\n/g, '<br>');
-  return html;
-};
-
-// Replace the simple getTextBoxBounds with this comprehensive version
-const getTextBoxBounds = (s: Shape) => {
-  const sides = resolveSides(s.sides);
-  const { cx, cy } = shapeCenter(s);
-  const theta = s.rotation ?? 0;
-  const rx = Math.abs(s.width) / 2;
-  const ry = Math.abs(s.height) / 2;
-
-  // For unrotated shapes, use the simple calculation
-  if (Math.abs(theta) < 0.001) {
-    const factor = 0.7;
-    return { boxW: rx * 2 * factor, boxH: ry * 2 * factor };
-  }
-
-  // For rotated shapes, we need to find the largest axis-aligned rectangle
-  // that fits inside the rotated shape
-
-  // Get the shape's boundary points in world coordinates
-  const getBoundaryPoints = (): Array<[number, number]> => {
-    const points: Array<[number, number]> = [];
-    const numPoints = sides === 0 ? 64 : sides; // Use 64 points for ellipse approximation
-    const startAngle = -Math.PI / 2;
-
-    for (let i = 0; i < numPoints; i++) {
-      const angle = startAngle + (i * 2 * Math.PI) / numPoints;
-      // Local coordinates
-      const lx = rx * Math.cos(angle);
-      const ly = ry * Math.sin(angle);
-      
-      // Rotate to world coordinates
-      const c = Math.cos(theta);
-      const s = Math.sin(theta);
-      const wx = cx + (lx * c - ly * s);
-      const wy = cy + (lx * s + ly * c);
-      
-      points.push([wx, wy]);
-    }
-    return points;
-  };
-
-  const boundaryPoints = getBoundaryPoints();
-
-  // Find the axis-aligned bounding box of all boundary points
-  let minX = Infinity, maxX = -Infinity;
-  let minY = Infinity, maxY = -Infinity;
-  for (const [x, y] of boundaryPoints) {
-    minX = Math.min(minX, x);
-    maxX = Math.max(maxX, x);
-    minY = Math.min(minY, y);
-    maxY = Math.max(maxY, y);
-  }
-
-  // Check if a point is inside the shape (in world coordinates)
-  const isInsideShape = (wx: number, wy: number): boolean => {
-    // Transform to local coordinates
-    const dx = wx - cx;
-    const dy = wy - cy;
-    const c = Math.cos(-theta);
-    const si = Math.sin(-theta);
-    const lx = dx * c - dy * si;
-    const ly = dx * si + dy * c;
-
-    if (sides === 4) {
-      return Math.abs(lx) <= rx && Math.abs(ly) <= ry;
-    }
-    if (sides === 0) {
-      return (lx * lx) / (rx * rx) + (ly * ly) / (ry * ry) <= 1;
-    }
-
-    // Polygon: use ray casting
-    const pts: Array<[number, number]> = [];
-    const start = -Math.PI / 2;
-    for (let i = 0; i < sides; i++) {
-      const ang = start + (i * 2 * Math.PI) / sides;
-      pts.push([rx * Math.cos(ang), ry * Math.sin(ang)]);
-    }
-    
-    let inside = false;
-    for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
-      const [xi, yi] = pts[i];
-      const [xj, yj] = pts[j];
-      const intersect = yi > ly !== yj > ly && lx < ((xj - xi) * (ly - yi)) / (yj - yi) + xi;
-      if (intersect) inside = !inside;
-    }
-    return inside;
-  };
-
-  // Binary search to find the largest rectangle centered at cx, cy
-  // that fits inside the shape
-  const findMaxRectangle = (): { boxW: number; boxH: number } => {
-    const maxW = maxX - minX;
-    const maxH = maxY - minY;
-
-    // Binary search for width
-    let wLow = 0, wHigh = maxW;
-    for (let iter = 0; iter < 20; iter++) {
-      const testW = (wLow + wHigh) / 2;
-      const testH = maxH * (testW / maxW); // Maintain aspect ratio loosely
-      
-      // Check if rectangle with this width fits
-      const corners = [
-        [cx - testW / 2, cy - testH / 2],
-        [cx + testW / 2, cy - testH / 2],
-        [cx - testW / 2, cy + testH / 2],
-        [cx + testW / 2, cy + testH / 2],
-      ];
-      
-      const allInside = corners.every(([x, y]) => isInsideShape(x, y));
-      
-      if (allInside) {
-        wLow = testW;
-      } else {
-        wHigh = testW;
-      }
-    }
-
-    // Binary search for height with the found width
-    const finalW = wLow * 0.95; // Use 95% of max for safety margin
-    let hLow = 0, hHigh = maxH;
-    for (let iter = 0; iter < 20; iter++) {
-      const testH = (hLow + hHigh) / 2;
-      
-      const corners = [
-        [cx - finalW / 2, cy - testH / 2],
-        [cx + finalW / 2, cy - testH / 2],
-        [cx - finalW / 2, cy + testH / 2],
-        [cx + finalW / 2, cy + testH / 2],
-      ];
-      
-      const allInside = corners.every(([x, y]) => isInsideShape(x, y));
-      
-      if (allInside) {
-        hLow = testH;
-      } else {
-        hHigh = testH;
-      }
-    }
-
-    const finalH = hLow * 0.95; // Use 95% of max for safety margin
-    
-    return { boxW: Math.max(20, finalW), boxH: Math.max(20, finalH) };
-  };
-
-  return findMaxRectangle();
-};
-
-const pointInTextBox = (s: Shape, wx: number, wy: number) => {
-  const { cx, cy } = shapeCenter(s);
-  const { boxW, boxH } = getTextBoxBounds(s);
-  const dx = Math.abs(wx - cx);
-  const dy = Math.abs(wy - cy);
-  return dx <= boxW / 2 && dy <= boxH / 2;
-};
 
 export default function CanvasViewport({ userId }: Props) {
   // ===== camera & cursors =====
@@ -731,15 +415,6 @@ export default function CanvasViewport({ userId }: Props) {
       return false;
     }
   }, [userId]);
-
-  // Tiny XML escaper for names
-  function escapeXML(s: string) {
-    return s
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
-  }
 
   const buildExportSVG = (): string | null => {
     const svg = svgRef.current;
@@ -2316,42 +1991,6 @@ export default function CanvasViewport({ userId }: Props) {
       moveRAF.current = null;
       fn();
     });
-  };
-
-  const nearCorner = (
-    s: Shape,
-    wx: number,
-    wy: number,
-    threshWorld: number
-  ): { type: "rect"; sx: 1 | -1; sy: 1 | -1 } | { type: "poly"; i: number } | null => {
-    const sides = resolveSides(s.sides);
-    const { lx, ly } = worldToLocal(s, wx, wy);
-    const rx = Math.abs(s.width) / 2;
-    const ry = Math.abs(s.height) / 2;
-
-    if (sides === 4) {
-      const candidates = [
-        { sx:  1 as const, sy:  1 as const, cx:  rx, cy:  ry },
-        { sx:  1 as const, sy: -1 as const, cx:  rx, cy: -ry },
-        { sx: -1 as const, sy:  1 as const, cx: -rx, cy:  ry },
-        { sx: -1 as const, sy: -1 as const, cx: -rx, cy: -ry },
-      ];
-      for (const c of candidates) {
-        if (Math.hypot(lx - c.cx, ly - c.cy) <= threshWorld) {
-          return { type: "rect", sx: c.sx, sy: c.sy };
-        }
-      }
-      return null;
-    }
-
-    const n = sides === 0 ? 16 : sides;
-    const start = -Math.PI / 2;
-    for (let i = 0; i < n; i++) {
-      const a = start + (i * 2 * Math.PI) / n;
-      const vx = rx * Math.cos(a), vy = ry * Math.sin(a);
-      if (Math.hypot(lx - vx, ly - vy) <= threshWorld) return { type: "poly", i };
-    }
-    return null;
   };
 
   const cursorForPerimeter = (s: Shape, wx: number, wy: number, modForRotate: boolean) => {

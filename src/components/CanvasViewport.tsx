@@ -40,6 +40,12 @@ import { ShapeRenderer } from "@/components/canvas/ShapeRenderer";
 import { ColorPickerPopover } from "@/components/canvas/ColorPickerPopover";
 import { ShapePropertiesModal } from "@/components/canvas/ShapePropertiesModal";
 
+// Canvas hooks
+import { useColorPicker } from "@/hooks/canvas/useColorPicker";
+import { usePresence } from "@/hooks/canvas/usePresence";
+import { useAnnotations } from "@/hooks/canvas/useAnnotations";
+import { useCanvasVersioning } from "@/hooks/canvas/useCanvasVersioning";
+
 type Props = { userId: string };
 
 type Shape = {
@@ -130,7 +136,6 @@ export default function CanvasViewport({ userId }: Props) {
 
   // Modal state
   const [modalShapeId, setModalShapeId] = useState<string | null>(null);
-  const [annotationInput, setAnnotationInput] = useState("");
   const [sidesInput, setSidesInput] = useState<string>("");
 
   // Z-index input state
@@ -151,14 +156,15 @@ export default function CanvasViewport({ userId }: Props) {
   const [textColorInput, setTextColorInput] = useState<string>(""); // NEW
 
   // Color picker popover
-  const [picker, setPicker] = useState<null | {
-    for: "stroke" | "fill" | "text"; // UPDATED
-    x: number;
-    y: number;
-    initial?: string;
-  }>(null);
-  const [recentColors, setRecentColors] = useState<string[]>([]);
-  const [lastColorTarget, setLastColorTarget] = useState<"stroke" | "fill" | "text">("stroke"); // UPDATED
+  // Color picker hook
+  const {
+    picker,
+    setPicker,
+    recentColors,
+    lastColorTarget,
+    setLastColorTarget,
+    addRecentColor,
+  } = useColorPicker();
 
   // refs
   const offsetRef = useRef(offset);
@@ -173,28 +179,6 @@ export default function CanvasViewport({ userId }: Props) {
   const svgRef = useRef<SVGSVGElement | null>(null);
   
 
-  // load/save recent colors
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem("recentColors");
-      if (raw) {
-        const arr = JSON.parse(raw) as string[];
-        if (Array.isArray(arr)) setRecentColors(arr.filter(c => HEX_RE.test(c)));
-      }
-    } catch {}
-  }, []);
-  useEffect(() => {
-    try { localStorage.setItem("recentColors", JSON.stringify(recentColors.slice(0, 16))); } catch {}
-  }, [recentColors]);
-
-  const addRecentColor = (hex: string) => {
-    const n = normalizeHex(hex);
-    if (!n) return;
-    setRecentColors((prev) => {
-      const filtered = prev.filter((c) => c.toLowerCase() !== n);
-      return [n, ...filtered].slice(0, 16);
-    });
-  };
 
   const worldFromSvgEvent = useCallback((e: React.MouseEvent<SVGSVGElement>) => {
     const svg = e.currentTarget as SVGSVGElement;
@@ -259,69 +243,33 @@ export default function CanvasViewport({ userId }: Props) {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
 
   // ===== presence =====
-  const tabIdRef = useRef(getTabId());
-  const presenceChRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
-  const rafRef = useRef<number | null>(null);
+  const { profiles, remoteCursors, schedulePublish } = usePresence({
+    userId,
+    offsetRef,
+    scaleRef,
+    cursorRef,
+    screenCursorRef,
+  });
 
-  const [profiles, setProfiles] = useState<Map<string, string>>(new Map());
-  useEffect(() => {
-    (async () => {
-      const { data } = await supabase.from("profiles").select("id,email");
-      if (data) setProfiles(new Map(data.map((r) => [r.id as string, (r.email as string) ?? ""])));
-    })();
-  }, []);
+  // ===== annotations =====
+  const {
+    annotationsByShape,
+    annotationInput,
+    setAnnotationInput,
+    deleteAnnotation,
+    loadAnnotationsForShape,
+    addAnnotation: addAnnotationHook,
+    aiAddAnnotation,
+    aiAddAnnotations,
+    getAnnotations,
+  } = useAnnotations({
+    userId,
+    shapesRef,
+    selectedIdsRef,
+    profiles,
+  });
 
   const [svgCursor, setSvgCursor] = useState<"default" | "crosshair" | "ew-resize" | "ns-resize" | "nwse-resize" | "nesw-resize" | "grab">("default");
-
-  type RemoteCursor = { worldX: number; worldY: number; at: number };
-  const [remoteCursors, setRemoteCursors] = useState<Map<string, RemoteCursor>>(new Map());
-
-  useEffect(() => {
-    const t = setInterval(() => {
-      const now = Date.now();
-      setRemoteCursors((prev) => {
-        const m = new Map(prev);
-        for (const [uid, rc] of m) {
-          if (now - rc.at > 4000) m.delete(uid);
-        }
-        return m;
-      });
-    }, 1000);
-    return () => clearInterval(t);
-  }, []);
-
-  const publish = useCallback(() => {
-    if (!presenceChRef.current) return;
-    const { x: cx, y: cy } = screenCursorRef.current;
-    const worldUnderCursorX = offsetRef.current.x + cx / scaleRef.current;
-    const worldUnderCursorY = offsetRef.current.y + cy / scaleRef.current;
-    presenceChRef.current.send({
-      type: "broadcast",
-      event: "canvas-meta",
-      payload: {
-        userId,
-        tabId: tabIdRef.current,
-        page: "canvas",
-        scrollX: Math.round(offsetRef.current.x),
-        scrollY: Math.round(offsetRef.current.y),
-        cursorDX: Math.round(cursorRef.current.dx),
-        cursorDY: Math.round(cursorRef.current.dy),
-        sumX: Math.round(offsetRef.current.x + cursorRef.current.dx),
-        sumY: Math.round(offsetRef.current.y + cursorRef.current.dy),
-        cursorWorldX: Math.round(worldUnderCursorX),
-        cursorWorldY: Math.round(worldUnderCursorY),
-        at: new Date().toISOString(),
-      },
-    });
-  }, [userId]);
-
-  const schedulePublish = useCallback(() => {
-    if (rafRef.current != null) return;
-    rafRef.current = requestAnimationFrame(() => {
-      rafRef.current = null;
-      publish();
-    });
-  }, [publish]);
 
   function isBackgroundRightClick(e: React.MouseEvent) {
     const svg = (e.currentTarget as HTMLElement).querySelector('svg') as SVGSVGElement | null;
@@ -353,368 +301,14 @@ export default function CanvasViewport({ userId }: Props) {
     return null;
   }
 
-  // Encode canvas to JSON
-  const encodeCanvasToJSON = useCallback(() => {
-    const canvasState = {
-      shapes: Array.from(shapesRef.current.values()).map(s => ({
-        id: s.id,
-        created_by: s.created_by,
-        x: s.x,
-        y: s.y,
-        width: s.width,
-        height: s.height,
-        stroke: s.stroke,
-        stroke_width: s.stroke_width,
-        fill: s.fill,
-        sides: s.sides,
-        rotation: s.rotation,
-        z: s.z,
-        name: s.name,
-        text_md: s.text_md,
-        text_color: s.text_color,
-        updated_at: s.updated_at,
-      })),
-      metadata: {
-        version: 1,
-        exported_at: nowIso(),
-        exported_by: userId,
-      }
-    };
-    return JSON.stringify(canvasState, null, 2);
-  }, [userId]);
-
-  // Decode and load canvas from JSON
-  const loadCanvasFromJSON = useCallback(async (jsonStr: string) => {
-    try {
-      const canvasState = JSON.parse(jsonStr);
-      if (!canvasState.shapes || !Array.isArray(canvasState.shapes)) {
-        throw new Error("Invalid canvas JSON format");
-      }
-
-      // Clear existing shapes
-      const oldShapes = Array.from(shapesRef.current.values());
-      setShapes(new Map());
-
-      // Delete from DB
-      const oldIds = oldShapes.map(s => s.id);
-      if (oldIds.length > 0) {
-        await supabase.from("shapes").delete().in("id", oldIds);
-        for (const id of oldIds) {
-          shapesChRef.current?.send({ type: "broadcast", event: "shape-delete", payload: { id } });
-        }
-      }
-
-      // Insert new shapes
-      const newShapes = canvasState.shapes as Shape[];
-      setShapes(new Map(newShapes.map(s => [s.id, s])));
-      
-      // Broadcast and persist
-      for (const shape of newShapes) {
-        shapesChRef.current?.send({ type: "broadcast", event: "shape-create", payload: shape });
-      }
-      
-      const { error } = await supabase.from("shapes").insert(newShapes);
-      if (error) {
-        console.warn("Failed to restore shapes to DB:", error);
-      }
-
-      return true;
-    } catch (err) {
-      console.error("Failed to load canvas from JSON:", err);
-      return false;
-    }
-  }, [userId]);
-
-  const buildExportSVG = (): string | null => {
-    const svg = svgRef.current;
-    if (!svg) return null;
-
-    // Get current viewport dimensions
-    const rect = svg.getBoundingClientRect();
-    const viewportWidth = rect.width || 1200;
-    const viewportHeight = rect.height || 800;
-
-    // Calculate visible world coordinates
-    const worldLeft = offsetRef.current.x;
-    const worldTop = offsetRef.current.y;
-    const worldWidth = viewportWidth / scaleRef.current;
-    const worldHeight = viewportHeight / scaleRef.current;
-
-    // Create standalone SVG with viewBox matching visible area
-    const viewBox = `${worldLeft} ${worldTop} ${worldWidth} ${worldHeight}`;
-
-    // Build shape elements directly
-    const shapeElements = shapeOrdered.map(s => {
-      const sides = resolveSides(s.sides);
-      const x = Math.min(s.x, s.x + s.width);
-      const y = Math.min(s.y, s.y + s.height);
-      const w = Math.abs(s.width);
-      const h = Math.abs(s.height);
-      const rotDeg = deg(s.rotation ?? 0);
-      const { cx, cy } = shapeCenter(s);
-
-      const transform = rotDeg ? ` transform="rotate(${rotDeg} ${cx} ${cy})"` : '';
-      const fill = s.fill ?? 'transparent';
-      const stroke = s.stroke;
-      const strokeWidth = s.stroke_width;
-
-      let shapeEl = '';
-      if (sides === 4) {
-        shapeEl = `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="${fill}" stroke="${stroke}" stroke-width="${strokeWidth}"${transform}/>`;
-      } else if (sides === 0) {
-        shapeEl = `<ellipse cx="${x + w/2}" cy="${y + h/2}" rx="${w/2}" ry="${h/2}" fill="${fill}" stroke="${stroke}" stroke-width="${strokeWidth}"${transform}/>`;
-      } else {
-        shapeEl = `<polygon points="${polygonPoints(x, y, w, h, sides)}" fill="${fill}" stroke="${stroke}" stroke-width="${strokeWidth}"${transform}/>`;
-      }
-
-      // Add text_md if present - positioned exactly as on screen using foreignObject
-      let textEl = '';
-      if (s.text_md && s.text_md.trim()) {
-        const { boxW, boxH } = getTextBoxBounds(s);
-        const textColor = (s.text_color && HEX_RE.test(s.text_color)) ? s.text_color : '#000000';
-        const fontSize = 14;
-        
-        // Render markdown to HTML (same as on-screen)
-        const htmlContent = renderMarkdown(s.text_md);
-        
-        // Use foreignObject to embed HTML exactly as shown on screen
-        const transformFO = rotDeg ? ` transform="rotate(${rotDeg} ${cx} ${cy})"` : "";
-
-        textEl = `<foreignObject x="${cx - boxW/2}" y="${cy - boxH/2}" width="${boxW}" height="${boxH}"${transformFO}>
-          <div xmlns="http://www.w3.org/1999/xhtml" style="width:100%;height:100%;padding:8px;overflow:auto;font-size:${fontSize}px;color:${textColor};font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica Neue,Arial;">
-            ${htmlContent}
-          </div>
-        </foreignObject>`;
-      }
-
-      return shapeEl + textEl;
-    }).join('\n');
-
-    // Create dot grid pattern
-    const dotPattern = `
-      <pattern id="dotGrid" width="${GRID_SIZE}" height="${GRID_SIZE}" patternUnits="userSpaceOnUse">
-        <circle cx="0" cy="0" r="${DOT_RADIUS}" fill="${DOT_COLOR}" />
-      </pattern>
-    `;
-
-    const exportSVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${viewBox}" width="${viewportWidth}" height="${viewportHeight}">
-      <defs>${dotPattern}</defs>
-      <rect x="${worldLeft}" y="${worldTop}" width="${worldWidth}" height="${worldHeight}" fill="url(#dotGrid)"/>
-      ${shapeElements}
-    </svg>`;
-
-    return exportSVG;
-  };
-
-  const exportAsSVG = useCallback(() => {
-    const svgString = buildExportSVG();
-    if (!svgString) return;
-    const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.download = `canvas-${Date.now()}.svg`;
-    a.href = url;
-    a.click();
-    URL.revokeObjectURL(url);
-  }, []);
-
-  const exportAsPNG = useCallback(() => {
-    const svgString = buildExportSVG();
-    if (!svgString) return;
-
-    const live = svgRef.current;
-    // Size from actual on-screen bounding box; fallback to viewBox
-    let width = 0, height = 0;
-    if (live) {
-      const rect = live.getBoundingClientRect();
-      width = Math.round(rect.width);
-      height = Math.round(rect.height);
-      if ((!width || !height) && live.viewBox.baseVal?.width && live.viewBox.baseVal?.height) {
-        width = live.viewBox.baseVal.width;
-        height = live.viewBox.baseVal.height;
-      }
-    }
-    if (!width || !height) { width = 1200; height = 800; }
-
-    const canvas = document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    // Some browsers behave better with data-URL than blob-URL for SVG rasterization
-    const dataUrl = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgString);
-    const img = new Image();
-
-    img.onload = async () => {
-      try { await img.decode?.(); } catch {}
-      ctx.clearRect(0, 0, width, height);
-      ctx.drawImage(img, 0, 0, width, height);
-      canvas.toBlob((png) => {
-        if (!png) return;
-        const a = document.createElement('a');
-        a.download = `canvas-${Date.now()}.png`;
-        a.href = URL.createObjectURL(png);
-        a.click();
-        URL.revokeObjectURL(a.href);
-      }, 'image/png');
-    };
-    img.onerror = () => {
-      // Fallback: try blob URL if data URL failed for any reason
-      const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const img2 = new Image();
-      img2.onload = () => {
-        ctx.clearRect(0, 0, width, height);
-        ctx.drawImage(img2, 0, 0, width, height);
-        URL.revokeObjectURL(url);
-        canvas.toBlob((png) => {
-          if (!png) return;
-          const a = document.createElement('a');
-          a.download = `canvas-${Date.now()}.png`;
-          a.href = URL.createObjectURL(png);
-          a.click();
-          URL.revokeObjectURL(a.href);
-        }, 'image/png');
-      };
-      img2.onerror = () => URL.revokeObjectURL(url);
-      img2.src = url;
-    };
-
-    img.src = dataUrl;
-  }, []);
-
-  // Export canvas as JSON
-  const exportAsJSON = useCallback(() => {
-    const json = encodeCanvasToJSON();
-    const blob = new Blob([json], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-
-    const link = document.createElement('a');
-    link.download = `canvas-${Date.now()}.json`;
-    link.href = url;
-    link.click();
-    URL.revokeObjectURL(url);
-  }, [encodeCanvasToJSON]);
-
-  // Save current canvas as a version
-  const saveCanvasVersion = useCallback(async () => {
-    const snapshot = encodeCanvasToJSON();
-    const version: Omit<CanvasVersion, 'id'> = {
-      created_at: nowIso(),
-      created_by: userId,
-      snapshot,
-    };
-
-    const { data, error } = await supabase
-      .from('canvas_versions')
-      .insert(version)
-      .select()
-      .single();
-
-    if (error) {
-      console.error("Failed to save version:", error);
-      return false;
-    }
-
-    // Reload versions
-    loadCanvasVersions();
-    return true;
-  }, [encodeCanvasToJSON, userId]);
-
-  // Load all versions
-  const loadCanvasVersions = useCallback(async () => {
-    const { data, error } = await supabase
-      .from('canvas_versions')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .limit(50);
-
-    if (error) {
-      console.error("Failed to load versions:", error);
-      return;
-    }
-
-    setCanvasVersions((data as CanvasVersion[]) || []);
-  }, []);
-
   const [canvasMenuPos, setCanvasMenuPos] = useState<{ x: number; y: number } | null>(null);
-  const [canvasVersions, setCanvasVersions] = useState<CanvasVersion[]>([]);
   const [showCanvasMenu, setShowCanvasMenu] = useState(false);
   const [canvasMenuTab, setCanvasMenuTab] = useState<'export' | 'versions'>('export');
 
   // use to force a re-render when we only mutate refs
   const [, forceRender] = useState(0);
 
-  // Restore a version
-  const restoreCanvasVersion = useCallback(async (versionId: string) => {
-    const version = canvasVersions.find(v => v.id === versionId);
-    if (!version) return false;
-
-    const success = await loadCanvasFromJSON(version.snapshot);
-    if (success) {
-      setShowCanvasMenu(false);
-    }
-    return success;
-  }, [canvasVersions, loadCanvasFromJSON]);
-
-  useEffect(() => {
-    loadCanvasVersions();
-  }, [loadCanvasVersions]);
-  
-  useEffect(() => {
-    const ch = supabase.channel("presence:canvas", { config: { presence: { key: userId } } });
-    presenceChRef.current = ch;
-
-    ch.on("broadcast", { event: "canvas-meta" }, ({ payload }) => {
-      const p = payload as {
-        userId: string;
-        cursorWorldX?: number;
-        cursorWorldY?: number;
-        at?: string;
-        page?: string;
-      };
-      if (!p || !p.userId || p.userId === userId) return;
-      if (p.page !== "canvas") return;
-      if (typeof p.cursorWorldX !== "number" || typeof p.cursorWorldY !== "number") return;
-      setRemoteCursors((prev) => {
-        const m = new Map(prev);
-        m.set(p.userId, {
-          worldX: p.cursorWorldX!,
-          worldY: p.cursorWorldY!,
-          at: p.at ? Date.parse(p.at) : Date.now(),
-        });
-        return m;
-      });
-    });
-
-    ch.subscribe(async (status) => {
-      if (status === "SUBSCRIBED") {
-        try {
-          await ch.track({ page: "canvas", tabId: tabIdRef.current, at: new Date().toISOString() });
-        } catch {}
-        publish();
-      }
-    });
-
-    const cleanup = async () => {
-      try { await ch.untrack(); } catch {}
-      try { await new Promise(r => setTimeout(r, 40)); } catch {}
-      try { await ch.unsubscribe(); } catch {}
-      try { supabase.removeChannel(ch); } catch {}
-    };
-
-    const onPageHide = () => { void cleanup(); };
-    const onBeforeUnload = () => { void cleanup(); };
-    window.addEventListener("pagehide", onPageHide);
-    window.addEventListener("beforeunload", onBeforeUnload);
-    return () => {
-      window.removeEventListener("pagehide", onPageHide);
-      window.removeEventListener("beforeunload", onBeforeUnload);
-      void cleanup();
-    };
-  }, [publish, userId]);
-
+  // Mouse movement tracking for cursor position
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
       const cx = window.innerWidth / 2;
@@ -954,23 +548,6 @@ export default function CanvasViewport({ userId }: Props) {
     }));
   }, [remoteCursors, profiles]);
 
-  // AI: Get UI state (modals, HUD, versions)
-  const getUIState = useCallback(() => {
-    return {
-      shapeModalOpen: modalShapeId !== null,
-      shapeModalShapeId: modalShapeId,
-      debugHUDVisible: showDebug,
-      canvasMenuOpen: showCanvasMenu,
-      canvasMenuTab: canvasMenuTab,
-      availableVersions: canvasVersions.map(v => ({
-        id: v.id,
-        created_at: v.created_at,
-        created_by: v.created_by,
-        email: profiles.get(v.created_by) ?? v.created_by,
-      })),
-    };
-  }, [modalShapeId, showDebug, showCanvasMenu, canvasMenuTab, canvasVersions, profiles]);
-
   // AI: Update shape properties
   const aiUpdateShapeProperties = useCallback(async (shapeId: string, updates: Partial<Shape>) => {
     console.log('AI: Updating shape', shapeId, 'with updates:', updates);
@@ -1066,108 +643,6 @@ export default function CanvasViewport({ userId }: Props) {
 
     return await aiUpdateShapeProperties(shapeId, { name: newName });
   }, [wordlists, aiUpdateShapeProperties]);
-
-  // AI: Add annotation to shape
-  const aiAddAnnotation = useCallback(async (shapeId: string, text: string) => {
-    const shape = shapesRef.current.get(shapeId);
-    if (!shape) {
-      return { success: false, error: 'Shape not found' };
-    }
-
-    const trimmedText = text.trim();
-    if (!trimmedText) {
-      return { success: false, error: 'Annotation text cannot be empty' };
-    }
-
-    const ann: ShapeAnnotationInsert = {
-      id: crypto.randomUUID(),
-      shape_id: shapeId,
-      user_id: userId,
-      text: trimmedText,
-      created_at: nowIso(),
-    };
-
-    // Optimistic update
-    setAnnotationsByShape(prev => {
-      const m = new Map(prev);
-      const arr = m.get(shapeId) ?? [];
-      m.set(shapeId, [...arr, ann]);
-      return m;
-    });
-
-    // Broadcast
-    annotationsChRef.current?.send({
-      type: "broadcast",
-      event: "annotation-upsert",
-      payload: ann,
-    });
-
-    // DB insert
-    const { error } = await supabase.from("shape_annotations").insert(ann);
-    if (error) {
-      console.warn("Annotation insert failed:", error.message);
-      // Rollback
-      setAnnotationsByShape(prev => {
-        const m = new Map(prev);
-        const arr = (m.get(shapeId) ?? []).filter(a => a.id !== ann.id);
-        m.set(shapeId, arr);
-        return m;
-      });
-      return { success: false, error: error.message };
-    }
-
-    return { success: true };
-  }, [userId]);
-
-  // AI: Add annotations to multiple shapes
-  const aiAddAnnotations = useCallback(async (annotations: Array<{ shapeId: string; text: string }>) => {
-    const validAnnotations = annotations.filter(({ shapeId }) => shapesRef.current.has(shapeId));
-    if (validAnnotations.length === 0) {
-      return { success: false, error: 'No valid shapes found' };
-    }
-
-    const createdAnnotations: Annotation[] = [];
-    const annotationsToRollback: Array<{ shapeId: string; id: string }> = [];
-
-    // Create all annotations
-    for (const { shapeId, text } of validAnnotations) {
-      const ann: Annotation = {
-        id: crypto.randomUUID(),
-        shape_id: shapeId,
-        user_id: userId,
-        text,
-        created_at: nowIso(),
-      };
-      createdAnnotations.push(ann);
-      annotationsToRollback.push({ shapeId, id: ann.id });
-
-      // Update local state
-      setAnnotationsByShape(prev => {
-        const m = new Map(prev);
-        const arr = m.get(shapeId) ?? [];
-        m.set(shapeId, [...arr, ann]);
-        return m;
-      });
-    }
-
-    // Batch insert to DB
-    const { error } = await supabase.from("shape_annotations").insert(createdAnnotations);
-    if (error) {
-      console.warn("Batch annotation insert failed:", error.message);
-      // Rollback all
-      for (const { shapeId, id } of annotationsToRollback) {
-        setAnnotationsByShape(prev => {
-          const m = new Map(prev);
-          const arr = (m.get(shapeId) ?? []).filter(a => a.id !== id);
-          m.set(shapeId, arr);
-          return m;
-        });
-      }
-      return { success: false, error: error.message };
-    }
-
-    return { success: true, count: createdAnnotations.length };
-  }, [userId]);
 
   // AI: Update properties for multiple shapes
   const aiUpdateShapesProperties = useCallback(async (shapeIds: string[], updates: Partial<Shape>) => {
@@ -1590,58 +1065,6 @@ export default function CanvasViewport({ userId }: Props) {
     }
   }, [showCanvasMenu]);
 
-  // AI: Download PNG
-  const aiDownloadPNG = useCallback(() => {
-    exportAsPNG();
-    return { success: true };
-  }, [exportAsPNG]);
-
-  // AI: Download SVG
-  const aiDownloadSVG = useCallback(() => {
-    exportAsSVG();
-    return { success: true };
-  }, [exportAsSVG]);
-
-  // AI: Download JSON
-  const aiDownloadJSON = useCallback(() => {
-    exportAsJSON();
-    return { success: true };
-  }, [exportAsJSON]);
-
-  // AI: Save version
-  const aiSaveVersion = useCallback(async () => {
-    const result = await saveCanvasVersion();
-    return { success: result !== false };
-  }, [saveCanvasVersion]);
-
-  // AI: Restore version
-  const aiRestoreVersion = useCallback(async (identifier: string | number) => {
-    // Handle different identifier types
-    let versionToRestore: CanvasVersion | undefined;
-
-    if (typeof identifier === 'string') {
-      // Try to match by date/time string or version ID
-      versionToRestore = canvasVersions.find(v => 
-        v.id === identifier || 
-        v.created_at.includes(identifier) ||
-        new Date(v.created_at).toLocaleString().includes(identifier)
-      );
-    } else if (typeof identifier === 'number') {
-      // Handle "last version", "5 versions ago", etc.
-      const index = identifier;
-      if (index >= 0 && index < canvasVersions.length) {
-        versionToRestore = canvasVersions[index];
-      }
-    }
-
-    if (!versionToRestore) {
-      return { success: false, error: 'Version not found' };
-    }
-
-    const result = await restoreCanvasVersion(versionToRestore.id);
-    return { success: result, versionId: versionToRestore.id };
-  }, [canvasVersions, restoreCanvasVersion]);
-
   // AI: Set zoom level (optionally with pan to focus point)
   const aiSetZoom = useCallback((zoomLevel: number, focusX?: number, focusY?: number) => {
     // Clamp zoom level to reasonable bounds (10% to 500%)
@@ -1894,6 +1317,130 @@ export default function CanvasViewport({ userId }: Props) {
       shapesChRef.current = null;
     };
   }, [upsertShapeLocal, removeShapeLocal]);
+
+  // ===== canvas versioning & export (after shapesChRef is ready) =====
+  const {
+    canvasVersions,
+    exportAsSVG,
+    exportAsPNG,
+    exportAsJSON,
+    saveCanvasVersion,
+    restoreCanvasVersion,
+    encodeCanvasToJSON,
+  } = useCanvasVersioning({
+    userId,
+    shapesRef,
+    offsetRef,
+    scaleRef,
+    svgRef,
+    shapeOrdered,
+    setShapes,
+    shapesChRef,
+  });
+
+  // Wrapper to close menu after restore
+  const restoreCanvasVersionAndClose = useCallback(async (versionId: string) => {
+    const success = await restoreCanvasVersion(versionId);
+    if (success) {
+      setShowCanvasMenu(false);
+    }
+    return success;
+  }, [restoreCanvasVersion]);
+
+  // AI: Get UI state (modals, HUD, versions) - needs canvasVersions from hook
+  const getUIState = useCallback(() => {
+    return {
+      shapeModalOpen: modalShapeId !== null,
+      shapeModalShapeId: modalShapeId,
+      debugHUDVisible: showDebug,
+      canvasMenuOpen: showCanvasMenu,
+      canvasMenuTab: canvasMenuTab,
+      availableVersions: canvasVersions.map(v => ({
+        id: v.id,
+        created_at: v.created_at,
+        created_by: v.created_by,
+        email: profiles.get(v.created_by) ?? v.created_by,
+      })),
+    };
+  }, [modalShapeId, showDebug, showCanvasMenu, canvasMenuTab, canvasVersions, profiles]);
+
+  // AI-callable keyboard handlers - after versioning hook
+  const keyboardExportPNG = useCallback(async () => {
+    exportAsPNG();
+    return { success: true };
+  }, [exportAsPNG]);
+
+  const keyboardExportSVG = useCallback(async () => {
+    exportAsSVG();
+    return { success: true };
+  }, [exportAsSVG]);
+
+  const keyboardExportJSON = useCallback(async () => {
+    exportAsJSON();
+    return { success: true };
+  }, [exportAsJSON]);
+
+  const keyboardSaveVersion = useCallback(async () => {
+    const result = await saveCanvasVersion();
+    return { success: result };
+  }, [saveCanvasVersion]);
+
+  // AI: Restore version
+  const aiRestoreVersion = useCallback(async (identifier: string | number) => {
+    // Handle different identifier types
+    let versionToRestore: CanvasVersion | undefined;
+
+    if (typeof identifier === 'string') {
+      // Try to match by date/time string or version ID
+      versionToRestore = canvasVersions.find(v => 
+        v.id === identifier || 
+        v.created_at.includes(identifier) ||
+        new Date(v.created_at).toLocaleString().includes(identifier)
+      );
+    } else if (typeof identifier === 'number') {
+      // Handle "last version", "5 versions ago", etc.
+      const index = identifier;
+      if (index >= 0 && index < canvasVersions.length) {
+        versionToRestore = canvasVersions[index];
+      }
+    }
+
+    if (!versionToRestore) {
+      return { success: false, error: 'Version not found' };
+    }
+
+    const result = await restoreCanvasVersion(versionToRestore.id);
+    return { success: result, versionId: versionToRestore.id };
+  }, [canvasVersions, restoreCanvasVersion]);
+
+  // AI: Download PNG
+  const aiDownloadPNG = useCallback(() => {
+    exportAsPNG();
+    return { success: true };
+  }, [exportAsPNG]);
+
+  // AI: Download SVG
+  const aiDownloadSVG = useCallback(() => {
+    exportAsSVG();
+    return { success: true };
+  }, [exportAsSVG]);
+
+  // AI: Download JSON
+  const aiDownloadJSON = useCallback(() => {
+    exportAsJSON();
+    return { success: true };
+  }, [exportAsJSON]);
+
+  // AI: Save version
+  const aiSaveVersion = useCallback(async () => {
+    const result = await saveCanvasVersion();
+    return { success: result !== false };
+  }, [saveCanvasVersion]);
+
+  const keyboardRestoreVersion = useCallback(async (versionToRestore: { id: string }) => {
+    const result = await restoreCanvasVersionAndClose(versionToRestore.id);
+    return { success: result };
+  }, [restoreCanvasVersionAndClose]);
 
   // Initial load
   useEffect(() => {
@@ -2483,75 +2030,7 @@ export default function CanvasViewport({ userId }: Props) {
     setEditingTextId(null);
   }, []);
 
-  // ===== Annotations (broadcast + DB) =====
-  const [annotationsByShape, setAnnotationsByShape] = useState<Map<string, Annotation[]>>(new Map());
-  const annotationsChRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
-
-  useEffect(() => {
-    const ch = supabase.channel("broadcast:annotations", { config: { broadcast: { self: false } } });
-    annotationsChRef.current = ch;
-
-    ch.on("broadcast", { event: "annotation-upsert" }, ({ payload }) => {
-      const ann = payload as Annotation;
-      if (!ann || !ann.shape_id || !ann.text) return;
-      setAnnotationsByShape(prev => {
-        const m = new Map(prev);
-        const curr = m.get(ann.shape_id) ?? [];
-        const idx = curr.findIndex(a => a.id === ann.id);
-        if (idx >= 0) curr[idx] = ann; else curr.push(ann);
-        m.set(ann.shape_id, [...curr].sort((a,b)=> new Date(a.created_at).getTime() - new Date(b.created_at).getTime()));
-        return m;
-      });
-    });
-
-    ch.on("broadcast", { event: "annotation-delete" }, ({ payload }) => {
-      const { id, shape_id } = payload as { id: string; shape_id: string };
-      if (!id || !shape_id) return;
-      setAnnotationsByShape(prev => {
-        const m = new Map(prev);
-        const curr = m.get(shape_id) ?? [];
-        m.set(shape_id, curr.filter(a => a.id !== id));
-        return m;
-      });
-    });
-
-    ch.subscribe();
-    return () => {
-      try { ch.unsubscribe(); } catch {}
-      try { supabase.removeChannel(ch); } catch {}
-      annotationsChRef.current = null;
-    };
-  }, []);
-
-  const deleteAnnotation = useCallback(async (id: string, shape_id: string) => {
-    // optimistic remove
-    setAnnotationsByShape(prev => {
-      const m = new Map(prev);
-      m.set(shape_id, (m.get(shape_id) ?? []).filter(a => a.id !== id));
-      return m;
-    });
-    annotationsChRef.current?.send({ type: "broadcast", event: "annotation-delete", payload: { id, shape_id } });
-    const { error } = await supabase.from("shape_annotations").delete().eq("id", id);
-    if (error) {
-      console.warn("Annotation delete failed:", error.message);
-      // reload this shape’s annotations from DB as fallback
-      try {
-        const { data } = await supabase
-          .from("shape_annotations")
-          .select("id,shape_id,user_id,text,created_at")
-          .eq("shape_id", shape_id)
-          .order("created_at", { ascending: true });
-        if (data) {
-          setAnnotationsByShape(prev => {
-            const m = new Map(prev);
-            m.set(shape_id, (data as Annotation[]).filter(a => a.text && a.text.trim().length > 0));
-            return m;
-          });
-        }
-      } catch {}
-    }
-  }, []);
-
+  // ===== Annotations (using hook) =====
   const openModalForShape = useCallback(async (shapeId: string) => {
     setModalShapeId(shapeId);
     setAnnotationInput("");
@@ -2562,7 +2041,7 @@ export default function CanvasViewport({ userId }: Props) {
     // Initialize style inputs
     setStrokeWidthInput(String(s?.stroke_width ?? 2));
     setStrokeColorInput(String(s?.stroke ?? "#000000"));
-    setTextColorInput(String(s?.text_color ?? "#000000")); // NEW
+    setTextColorInput(String(s?.text_color ?? "#000000"));
     if (s?.fill == null) {
       setNoFill(true);
       setFillColorInput("#ffffff");
@@ -2572,125 +2051,14 @@ export default function CanvasViewport({ userId }: Props) {
     }
     setLastColorTarget("stroke");
 
-    try {
-      const { data, error } = await supabase
-        .from("shape_annotations")
-        .select("id,shape_id,user_id,text,created_at")
-        .eq("shape_id", shapeId)
-        .order("created_at", { ascending: true });
-      if (!error && data) {
-        const incoming = (data as Annotation[]).filter(a => a.text && a.text.trim().length > 0);
-        setAnnotationsByShape(prev => {
-          const existing = prev.get(shapeId) ?? [];
-          const byId = new Map<string, Annotation>();
-          for (const a of existing) byId.set(a.id, a);
-          for (const a of incoming) byId.set(a.id, a);
-          const merged = Array.from(byId.values()).sort(
-            (a,b)=> new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
-          );
-          const m = new Map(prev); m.set(shapeId, merged); return m;
-        });
-      }
-    } catch (err) { console.warn("Annotation fetch skipped:", err); }
-  }, []);
+    // Load annotations for this shape
+    await loadAnnotationsForShape(shapeId);
+  }, [loadAnnotationsForShape, setAnnotationInput, setLastColorTarget]);
 
-  const closeModal = useCallback(() => { setModalShapeId(null); setAnnotationInput(""); setPicker(null); }, []);
+  const closeModal = useCallback(() => { setModalShapeId(null); setAnnotationInput(""); setPicker(null); }, [setAnnotationInput]);
 
-  // AI: Get annotations with optional filters
-  const getAnnotations = useCallback((filters?: {
-    shapeId?: string;
-    userId?: string;
-    startDate?: string;
-    endDate?: string;
-  }) => {
-    let allAnnotations: (Annotation & { shape_name?: string })[] = [];
-    
-    // Collect all annotations from the map
-    for (const [shapeId, annotations] of annotationsByShape.entries()) {
-      const shapeName = shapesRef.current.get(shapeId)?.name;
-      annotations.forEach(ann => {
-        allAnnotations.push({
-          ...ann,
-          shape_name: shapeName,
-        });
-      });
-    }
-
-    // Apply filters
-    if (filters?.shapeId) {
-      allAnnotations = allAnnotations.filter(ann => ann.shape_id === filters.shapeId);
-    }
-    
-    if (filters?.userId) {
-      allAnnotations = allAnnotations.filter(ann => ann.user_id === filters.userId);
-    }
-    
-    if (filters?.startDate) {
-      allAnnotations = allAnnotations.filter(ann => ann.created_at >= filters.startDate!);
-    }
-    
-    if (filters?.endDate) {
-      allAnnotations = allAnnotations.filter(ann => ann.created_at <= filters.endDate!);
-    }
-
-    // Add user email for each annotation
-    return allAnnotations.map(ann => ({
-      ...ann,
-      user_email: profiles.get(ann.user_id) ?? ann.user_id,
-    }));
-  }, [annotationsByShape, profiles]);
-
-  const addAnnotation = useCallback(async () => {
-    const text = annotationInput.trim();
-    if (!text || !modalShapeId) return;
-
-    const targetIds = (selectedIdsRef.current.size > 0 && selectedIdsRef.current.has(modalShapeId))
-      ? Array.from(selectedIdsRef.current)
-      : [modalShapeId];
-
-    const now = nowIso();
-    const anns: ShapeAnnotationInsert[] = targetIds.map((shapeId) => ({
-      id: (typeof crypto !== "undefined" && "randomUUID" in crypto)
-        ? crypto.randomUUID()
-        : `ann_${Math.random().toString(36).slice(2)}`,
-      shape_id: shapeId,
-      user_id: userId,
-      text,
-      created_at: now,
-    }));
-
-    setAnnotationsByShape(prev => {
-      const m = new Map(prev);
-      for (const ann of anns) {
-        const arr = m.get(ann.shape_id) ?? [];
-        m.set(ann.shape_id, [...arr, ann]);
-      }
-      return m;
-    });
-
-    setAnnotationInput("");
-
-    for (const ann of anns) {
-      annotationsChRef.current?.send({
-        type: "broadcast",
-        event: "annotation-upsert",
-        payload: ann,
-      });
-    }
-
-    const { error } = await supabase.from("shape_annotations").insert(anns);
-    if (error) {
-      console.warn("Annotation insert failed:", error.message);
-      setAnnotationsByShape(prev => {
-        const m = new Map(prev);
-        for (const ann of anns) {
-          const arr = (m.get(ann.shape_id) ?? []).filter(a => a.id !== ann.id);
-          m.set(ann.shape_id, arr);
-        }
-        return m;
-      });
-    }
-  }, [annotationInput, modalShapeId, userId]);
+  // Wrapper for addAnnotation that passes modalShapeId
+  const addAnnotation = useCallback(() => addAnnotationHook(modalShapeId), [addAnnotationHook, modalShapeId]);
 
   const saveSides = useCallback(async () => {
     if (!modalShapeId) return;
@@ -3105,7 +2473,7 @@ export default function CanvasViewport({ userId }: Props) {
         onExportSVG={exportAsSVG}
         onExportJSON={exportAsJSON}
         onSaveVersion={saveCanvasVersion}
-        onRestoreVersion={(versionId) => void restoreCanvasVersion(versionId)}
+        onRestoreVersion={(versionId) => void restoreCanvasVersionAndClose(versionId)}
       />
       {/* Debug HUD */}
       <DebugHUD visible={showDebug} offset={offset} scale={scale} cursor={cursor} />

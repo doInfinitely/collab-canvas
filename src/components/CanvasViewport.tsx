@@ -47,6 +47,7 @@ import { useAnnotations } from "@/hooks/canvas/useAnnotations";
 import { useCanvasVersioning } from "@/hooks/canvas/useCanvasVersioning";
 import { useKeyboardShortcuts } from "@/hooks/canvas/useKeyboardShortcuts";
 import { usePanZoom } from "@/hooks/canvas/usePanZoom";
+import { useAIHelpers } from "@/hooks/canvas/useAIHelpers";
 
 type Props = { userId: string };
 
@@ -449,18 +450,6 @@ export default function CanvasViewport({ userId }: Props) {
 
 
   // ===== AI Helper Functions =====
-  const getSelectedShapeIds = useCallback(() => {
-    return Array.from(selectedIds);
-  }, [selectedIds]);
-
-  const getUserCursors = useCallback(() => {
-    return Array.from(remoteCursors.entries()).map(([uid, cursor]) => ({
-      userId: uid,
-      email: profiles.get(uid) ?? uid,
-      worldX: cursor.worldX,
-      worldY: cursor.worldY,
-    }));
-  }, [remoteCursors, profiles]);
 
   // AI: Update shape properties
   const aiUpdateShapeProperties = useCallback(async (shapeId: string, updates: Partial<Shape>) => {
@@ -716,37 +705,6 @@ export default function CanvasViewport({ userId }: Props) {
   }, []);
 
   // AI: Add shapes to selection
-  const aiAddToSelection = useCallback((shapeIds: string[]) => {
-    const validIds = shapeIds.filter(id => shapesRef.current.has(id));
-    if (validIds.length === 0) {
-      return { success: false, error: 'No valid shapes found' };
-    }
-
-    setSelectedIds(prev => {
-      const newSet = new Set(prev);
-      validIds.forEach(id => newSet.add(id));
-      return newSet;
-    });
-
-    return { success: true, added: validIds.length };
-  }, []);
-
-  // AI: Remove shapes from selection
-  const aiRemoveFromSelection = useCallback((shapeIds: string[]) => {
-    setSelectedIds(prev => {
-      const newSet = new Set(prev);
-      shapeIds.forEach(id => newSet.delete(id));
-      return newSet;
-    });
-
-    return { success: true, removed: shapeIds.length };
-  }, []);
-
-  // AI: Clear selection
-  const aiClearSelection = useCallback(() => {
-    setSelectedIds(new Set());
-    return { success: true };
-  }, []);
 
   // AI: Create shape
   const aiCreateShape = useCallback(async (params: {
@@ -916,69 +874,7 @@ export default function CanvasViewport({ userId }: Props) {
     return { success: true, deletedCount: validIds.length };
   }, []);
 
-  // AI: Open/close/toggle shape property modal
-  const aiToggleShapeModal = useCallback((action: 'open' | 'close' | 'toggle', shapeId?: string) => {
-    if (action === 'close') {
-      setModalShapeId(null);
-      return { success: true, isOpen: false };
-    }
-    
-    if (action === 'toggle') {
-      if (modalShapeId) {
-        setModalShapeId(null);
-        return { success: true, isOpen: false };
-      } else if (shapeId && shapesRef.current.has(shapeId)) {
-        setModalShapeId(shapeId);
-        return { success: true, isOpen: true, shapeId };
-      } else {
-        return { success: false, error: 'No shape specified for toggle' };
-      }
-    }
-    
-    if (action === 'open') {
-      if (!shapeId) {
-        return { success: false, error: 'Shape ID required to open modal' };
-      }
-      if (!shapesRef.current.has(shapeId)) {
-        return { success: false, error: 'Shape not found' };
-      }
-      setModalShapeId(shapeId);
-      return { success: true, isOpen: true, shapeId };
-    }
-
-    return { success: false, error: 'Invalid action' };
-  }, [modalShapeId]);
-
-  // AI: Toggle debug HUD
-  const aiToggleDebugHUD = useCallback((action: 'show' | 'hide' | 'toggle') => {
-    if (action === 'show') {
-      setShowDebug(true);
-      return { success: true, isVisible: true };
-    } else if (action === 'hide') {
-      setShowDebug(false);
-      return { success: true, isVisible: false };
-    } else {
-      setShowDebug(prev => !prev);
-      return { success: true, isVisible: !showDebug };
-    }
-  }, [showDebug]);
-
-  // AI: Toggle canvas menu
-  const aiToggleCanvasMenu = useCallback((action: 'show' | 'hide' | 'toggle', tab?: 'export' | 'versions') => {
-    if (action === 'show') {
-      setShowCanvasMenu(true);
-      if (tab) setCanvasMenuTab(tab);
-      return { success: true, isOpen: true };
-    } else if (action === 'hide') {
-      setShowCanvasMenu(false);
-      return { success: true, isOpen: false };
-    } else {
-      setShowCanvasMenu(prev => !prev);
-      if (tab) setCanvasMenuTab(tab);
-      return { success: true, isOpen: !showCanvasMenu };
-    }
-  }, [showCanvasMenu]);
-
+  // AI: Open/close/toggle shape property modal (moved to useAIHelpers hook)
 
   const onMouseUpRoot = (e: React.MouseEvent<HTMLDivElement>) => { 
     // Handle right mouse button up
@@ -1259,6 +1155,31 @@ export default function CanvasViewport({ userId }: Props) {
     offset,
     scale,
     schedulePublish,
+  });
+
+  // ===== AI helpers hook =====
+  const {
+    getSelectedShapeIds,
+    getUserCursors,
+    aiAddToSelection,
+    aiRemoveFromSelection,
+    aiClearSelection,
+    aiToggleShapeModal,
+    aiToggleDebugHUD,
+    aiToggleCanvasMenu,
+  } = useAIHelpers({
+    shapesRef,
+    selectedIds,
+    setSelectedIds,
+    modalShapeId,
+    setModalShapeId,
+    showDebug,
+    setShowDebug,
+    showCanvasMenu,
+    setShowCanvasMenu,
+    setCanvasMenuTab,
+    remoteCursors,
+    profiles,
   });
 
   // AI: Restore version

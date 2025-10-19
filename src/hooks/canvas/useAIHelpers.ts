@@ -14,7 +14,7 @@ type UseAIHelpersProps = {
   showCanvasMenu: boolean;
   setShowCanvasMenu: (value: boolean | ((prev: boolean) => boolean)) => void;
   setCanvasMenuTab: (value: 'export' | 'versions') => void;
-  remoteCursors: Map<string, any>;
+  remoteCursors: Map<string, { worldX: number; worldY: number; at: number }>;
   profiles: Map<string, string>;
 };
 

@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useEffect } from 'react';
 import { supabase } from '@/lib/supabase/client';
+import type { RealtimeChannel } from '@supabase/supabase-js';
 import { nowIso, resolveSides, deg } from '@/lib/canvas/shapes';
 import { shapeCenter, getTextBoxBounds, polygonPoints } from '@/lib/canvas/geometry';
 import { renderMarkdown } from '@/lib/canvas/markdown';
@@ -27,7 +28,7 @@ type UseCanvasVersioningProps = {
   svgRef: React.RefObject<SVGSVGElement | null>;
   shapeOrdered: Shape[];
   setShapes: (shapes: Map<string, Shape>) => void;
-  shapesChRef: React.RefObject<any>;
+  shapesChRef: React.RefObject<RealtimeChannel | null>;
 };
 
 export function useCanvasVersioning({

@@ -5,6 +5,25 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+// Type definitions
+type Shape = {
+  id: string;
+  [key: string]: unknown;
+};
+
+type Annotation = {
+  shape_id: string;
+  user_id: string;
+  created_at: string;
+  [key: string]: unknown;
+};
+
+type MessageHistoryItem = {
+  role: 'user' | 'assistant';
+  content: string;
+  [key: string]: unknown;
+};
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
@@ -712,7 +731,7 @@ Example for "make the selected shapes blue" (MOST EFFICIENT):
     if (messageHistory && Array.isArray(messageHistory)) {
       // Filter out any system messages from history and add user/assistant messages
       const validHistory = messageHistory.filter(
-        (msg: any) => msg.role === 'user' || msg.role === 'assistant'
+        (msg: MessageHistoryItem) => msg.role === 'user' || msg.role === 'assistant'
       );
       messages.push(...validHistory);
     }
@@ -745,7 +764,7 @@ Example for "make the selected shapes blue" (MOST EFFICIENT):
       const actionFunctionCalls: Array<{
         id: string;
         name: string;
-        arguments: any;
+        arguments: Record<string, unknown>;
       }> = [];
 
       for (const toolCall of responseMessage.tool_calls) {
@@ -758,12 +777,12 @@ Example for "make the selected shapes blue" (MOST EFFICIENT):
         let functionResult;
         if (functionName === 'getCanvasJSON') {
           functionResult = canvasJSON;
-      } else if (functionName === 'getCurrentSelection') {
+        } else if (functionName === 'getCurrentSelection') {
         // Parse canvas JSON to enrich selection data with shape details
         try {
           const canvas = JSON.parse(canvasJSON);
           if (canvas.shapes) {
-            const selectedShapes = canvas.shapes.filter((s: any) => 
+            const selectedShapes = canvas.shapes.filter((s: Shape) => 
               selectedShapeIds.includes(s.id)
             );
             functionResult = JSON.stringify({ 
@@ -847,16 +866,16 @@ Example for "make the selected shapes blue" (MOST EFFICIENT):
           // Apply filters to annotations
           let filteredAnnotations = annotations || [];
           if (args.shapeId) {
-            filteredAnnotations = filteredAnnotations.filter((ann: any) => ann.shape_id === args.shapeId);
+            filteredAnnotations = filteredAnnotations.filter((ann: Annotation) => ann.shape_id === args.shapeId);
           }
           if (args.userId) {
-            filteredAnnotations = filteredAnnotations.filter((ann: any) => ann.user_id === args.userId);
+            filteredAnnotations = filteredAnnotations.filter((ann: Annotation) => ann.user_id === args.userId);
           }
           if (args.startDate) {
-            filteredAnnotations = filteredAnnotations.filter((ann: any) => ann.created_at >= args.startDate);
+            filteredAnnotations = filteredAnnotations.filter((ann: Annotation) => ann.created_at >= args.startDate);
           }
           if (args.endDate) {
-            filteredAnnotations = filteredAnnotations.filter((ann: any) => ann.created_at <= args.endDate);
+            filteredAnnotations = filteredAnnotations.filter((ann: Annotation) => ann.created_at <= args.endDate);
           }
           functionResult = JSON.stringify({ annotations: filteredAnnotations, count: filteredAnnotations.length }, null, 2);
         } else if (functionName === 'createShape') {
@@ -1032,7 +1051,7 @@ Example for "make the selected shapes blue" (MOST EFFICIENT):
             try {
               const canvas = JSON.parse(canvasJSON);
               if (canvas.shapes) {
-                const selectedShapes = canvas.shapes.filter((s: any) => 
+                const selectedShapes = canvas.shapes.filter((s: Shape) => 
                   selectedShapeIds.includes(s.id)
                 );
                 functionResult = JSON.stringify({ 
@@ -1054,16 +1073,16 @@ Example for "make the selected shapes blue" (MOST EFFICIENT):
             // Apply filters to annotations
             let filteredAnnotations = annotations || [];
             if (args.shapeId) {
-              filteredAnnotations = filteredAnnotations.filter((ann: any) => ann.shape_id === args.shapeId);
+              filteredAnnotations = filteredAnnotations.filter((ann: Annotation) => ann.shape_id === args.shapeId);
             }
             if (args.userId) {
-              filteredAnnotations = filteredAnnotations.filter((ann: any) => ann.user_id === args.userId);
+              filteredAnnotations = filteredAnnotations.filter((ann: Annotation) => ann.user_id === args.userId);
             }
             if (args.startDate) {
-              filteredAnnotations = filteredAnnotations.filter((ann: any) => ann.created_at >= args.startDate);
+              filteredAnnotations = filteredAnnotations.filter((ann: Annotation) => ann.created_at >= args.startDate);
             }
             if (args.endDate) {
-              filteredAnnotations = filteredAnnotations.filter((ann: any) => ann.created_at <= args.endDate);
+              filteredAnnotations = filteredAnnotations.filter((ann: Annotation) => ann.created_at <= args.endDate);
             }
             functionResult = JSON.stringify({ annotations: filteredAnnotations, count: filteredAnnotations.length }, null, 2);
           } else if (functionName === 'getViewport') {

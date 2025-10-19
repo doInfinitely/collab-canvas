@@ -12,14 +12,28 @@ type Message = {
 type FunctionCall = {
   id: string;
   name: string;
-  arguments: Record<string, any>;
+  arguments: Record<string, unknown>;
 };
 
 type AIActionResult = {
   success: boolean;
   error?: string;
-  [key: string]: any;
+  [key: string]: unknown;
 };
+
+type CreateShapeParams = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  sides?: number;
+  stroke?: string;
+  fill?: string | null;
+  text_md?: string;
+  text_color?: string;
+};
+
+type UpdateShapeParams = Record<string, unknown>;
 
 type ChatBoxProps = {
   onPanToCoordinate: (x: number, y: number) => void;
@@ -33,16 +47,16 @@ type ChatBoxProps = {
   getCanvasJSON: () => string;
   getSelectedShapeIds: () => string[];
   getUserCursors: () => Array<{ userId: string; email: string; worldX: number; worldY: number }>;
-  getUIState: () => any;
-  getAnnotations: (filters?: { shapeId?: string; userId?: string; startDate?: string; endDate?: string }) => any[];
-  aiGetViewport: () => any;
-  aiUpdateShapeProperties: (shapeId: string, updates: any) => Promise<AIActionResult>;
+  getUIState: () => Record<string, unknown>;
+  getAnnotations: (filters?: { shapeId?: string; userId?: string; startDate?: string; endDate?: string }) => Array<Record<string, unknown>>;
+  aiGetViewport: () => Record<string, unknown>;
+  aiUpdateShapeProperties: (shapeId: string, updates: UpdateShapeParams) => Promise<AIActionResult>;
   aiRenameShape: (shapeId: string, newName: string) => Promise<AIActionResult>;
   aiAddAnnotation: (shapeId: string, text: string) => Promise<AIActionResult>;
   aiAddToSelection: (shapeIds: string[]) => AIActionResult;
   aiRemoveFromSelection: (shapeIds: string[]) => AIActionResult;
   aiClearSelection: () => AIActionResult;
-  aiCreateShape: (params: any) => Promise<AIActionResult>;
+  aiCreateShape: (params: CreateShapeParams) => Promise<AIActionResult>;
   aiDeleteShapes: (shapeIds: string[]) => Promise<AIActionResult>;
   aiToggleShapeModal: (action: 'open' | 'close' | 'toggle', shapeId?: string) => AIActionResult;
   aiToggleDebugHUD: (action: 'show' | 'hide' | 'toggle') => AIActionResult;
@@ -54,10 +68,10 @@ type ChatBoxProps = {
   aiRestoreVersion: (identifier: string | number) => Promise<AIActionResult>;
   aiSetZoom: (zoomLevel: number, focusX?: number, focusY?: number) => AIActionResult;
   aiSetPan: (x: number, y: number) => AIActionResult;
-  aiCreateShapes: (shapesList: any[]) => Promise<AIActionResult>;
+  aiCreateShapes: (shapesList: CreateShapeParams[]) => Promise<AIActionResult>;
   aiAddAnnotations: (annotations: Array<{ shapeId: string; text: string }>) => Promise<AIActionResult>;
-  aiUpdateShapesProperties: (shapeIds: string[], updates: any) => Promise<AIActionResult>;
-  aiUpdateSelectionProperties: (updates: any) => Promise<AIActionResult>;
+  aiUpdateShapesProperties: (shapeIds: string[], updates: UpdateShapeParams) => Promise<AIActionResult>;
+  aiUpdateSelectionProperties: (updates: UpdateShapeParams) => Promise<AIActionResult>;
 };
 
 export default function ChatBox({ 
@@ -465,19 +479,19 @@ export default function ChatBox({
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {messages.length === 0 && (
           <div className="text-center text-gray-500 text-sm mt-8">
-            <p className="mb-2">👋 Hi! I'm your AI assistant.</p>
+            <p className="mb-2">👋 Hi! I&apos;m your AI assistant.</p>
             <p>I can help you:</p>
             <ul className="mt-2 text-left inline-block text-xs">
-              <li>• "Create a blue circle at 500, 300"</li>
-              <li>• "Delete the selected shapes"</li>
-              <li>• "Zoom to 200%"</li>
-              <li>• "Move BigCircle to 100, 200"</li>
-              <li>• "Change the fill color to red"</li>
-              <li>• "Add 2 sides to the hexagon"</li>
-              <li>• "Toggle the debug HUD"</li>
-              <li>• "Download this canvas as PNG"</li>
-              <li>• "Save this version"</li>
-              <li>• "What's the current zoom?"</li>
+              <li>• &quot;Create a blue circle at 500, 300&quot;</li>
+              <li>• &quot;Delete the selected shapes&quot;</li>
+              <li>• &quot;Zoom to 200%&quot;</li>
+              <li>• &quot;Move BigCircle to 100, 200&quot;</li>
+              <li>• &quot;Change the fill color to red&quot;</li>
+              <li>• &quot;Add 2 sides to the hexagon&quot;</li>
+              <li>• &quot;Toggle the debug HUD&quot;</li>
+              <li>• &quot;Download this canvas as PNG&quot;</li>
+              <li>• &quot;Save this version&quot;</li>
+              <li>• &quot;What&apos;s the current zoom?&quot;</li>
             </ul>
           </div>
         )}

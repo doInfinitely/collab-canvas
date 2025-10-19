@@ -34,6 +34,7 @@ type ChatBoxProps = {
   getSelectedShapeIds: () => string[];
   getUserCursors: () => Array<{ userId: string; email: string; worldX: number; worldY: number }>;
   getUIState: () => any;
+  getAnnotations: (filters?: { shapeId?: string; userId?: string; startDate?: string; endDate?: string }) => any[];
   aiGetViewport: () => any;
   aiUpdateShapeProperties: (shapeId: string, updates: any) => Promise<AIActionResult>;
   aiRenameShape: (shapeId: string, newName: string) => Promise<AIActionResult>;
@@ -66,6 +67,7 @@ export default function ChatBox({
   getSelectedShapeIds,
   getUserCursors,
   getUIState,
+  getAnnotations,
   aiGetViewport,
   aiUpdateShapeProperties,
   aiRenameShape,
@@ -143,6 +145,7 @@ export default function ChatBox({
           selectedShapeIds: getSelectedShapeIds(),
           userCursors: getUserCursors(),
           uiState: getUIState(),
+          annotations: getAnnotations(), // All annotations for filtering server-side
         }),
       });
 

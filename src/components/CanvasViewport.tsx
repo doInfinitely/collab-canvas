@@ -2948,6 +2948,50 @@ export default function CanvasViewport({ userId }: Props) {
 
   const closeModal = useCallback(() => { setModalShapeId(null); setAnnotationInput(""); setPicker(null); }, []);
 
+  // AI: Get annotations with optional filters
+  const getAnnotations = useCallback((filters?: {
+    shapeId?: string;
+    userId?: string;
+    startDate?: string;
+    endDate?: string;
+  }) => {
+    let allAnnotations: (Annotation & { shape_name?: string })[] = [];
+    
+    // Collect all annotations from the map
+    for (const [shapeId, annotations] of annotationsByShape.entries()) {
+      const shapeName = shapesRef.current.get(shapeId)?.name;
+      annotations.forEach(ann => {
+        allAnnotations.push({
+          ...ann,
+          shape_name: shapeName,
+        });
+      });
+    }
+
+    // Apply filters
+    if (filters?.shapeId) {
+      allAnnotations = allAnnotations.filter(ann => ann.shape_id === filters.shapeId);
+    }
+    
+    if (filters?.userId) {
+      allAnnotations = allAnnotations.filter(ann => ann.user_id === filters.userId);
+    }
+    
+    if (filters?.startDate) {
+      allAnnotations = allAnnotations.filter(ann => ann.created_at >= filters.startDate!);
+    }
+    
+    if (filters?.endDate) {
+      allAnnotations = allAnnotations.filter(ann => ann.created_at <= filters.endDate!);
+    }
+
+    // Add user email for each annotation
+    return allAnnotations.map(ann => ({
+      ...ann,
+      user_email: profiles.get(ann.user_id) ?? ann.user_id,
+    }));
+  }, [annotationsByShape, profiles]);
+
   const addAnnotation = useCallback(async () => {
     const text = annotationInput.trim();
     if (!text || !modalShapeId) return;
@@ -4014,6 +4058,7 @@ export default function CanvasViewport({ userId }: Props) {
           getSelectedShapeIds={getSelectedShapeIds}
           getUserCursors={getUserCursors}
           getUIState={getUIState}
+          getAnnotations={getAnnotations}
           aiGetViewport={aiGetViewport}
           aiUpdateShapeProperties={aiUpdateShapeProperties}
           aiRenameShape={aiRenameShape}

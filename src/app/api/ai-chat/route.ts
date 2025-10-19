@@ -8,7 +8,7 @@ const openai = new OpenAI({
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { message, messageHistory, canvasState, canvasJSON, selectedShapeIds, userCursors, uiState } = body;
+    const { message, messageHistory, canvasState, canvasJSON, selectedShapeIds, userCursors, uiState, annotations } = body;
 
     if (!message || typeof message !== 'string') {
       return NextResponse.json(
@@ -32,12 +32,12 @@ Current canvas state:
 
 CAPABILITIES:
 1. VIEWPORT CONTROL: Pan to coordinates, set zoom level, read/write viewport state (zoom + pan combined)
-2. INSPECTION: View canvas, selections, user locations, viewport state, and UI state
+2. INSPECTION: View canvas, selections, user locations, viewport state, UI state, and annotations
 3. CREATE: Add new shapes to the canvas
 4. DELETE: Remove shapes from the canvas
 5. MODIFICATION: Update shape properties (position, size, colors, text, sides, z-index)
 6. NAMING: Rename shapes (must use AdjectiveNoun format from wordlists)
-7. ANNOTATION: Add notes to shapes
+7. ANNOTATION: Read and add notes to shapes (filter by shape, user, or timeframe)
 8. SELECTION: Add/remove shapes from selection or clear selection
 9. UI CONTROL: Open/close/toggle shape modals, debug HUD, canvas menu
 10. EXPORT: Download canvas as PNG, SVG, or JSON
@@ -53,6 +53,7 @@ IMPORTANT NOTES:
 - Version restore: users can refer to versions by date/time, "last version", "penultimate", "5 versions ago"
 - Zoom and pan are coupled: you can zoom to a specific point using setZoom with focusX/focusY
 - Use getViewport() to read current pan and zoom together
+- Annotations: Use getAnnotations() to read notes on shapes, filter by shapeId/userId/timeframe as needed
 
 CRITICAL INSTRUCTIONS - YOU MUST FOLLOW THESE:
 
@@ -82,6 +83,29 @@ CRITICAL INSTRUCTIONS - YOU MUST FOLLOW THESE:
    - Batch operations on multiple shapes into single calls
    - For selection operations, use updateSelectionProperties (most efficient!)
 
+5. SPATIAL QUERIES - HOW TO REASON ABOUT SHAPES:
+   When analyzing spatial relationships (touching, overlapping, near, inside, etc.):
+   a) Parse the canvas JSON to get ALL shapes - don't just sample a few
+   b) For each candidate shape, compute the relationship mathematically
+   c) Collect ALL matching shape IDs before calling update functions
+   
+   Example: "Find all shapes touching ShapeX"
+   Step 1: Get canvas JSON and find ShapeX's bounding box (x, y, width, height)
+   Step 2: For EVERY other shape, check if it intersects ShapeX's bounding box
+   Step 3: Rectangle intersection formula:
+      - Shape A and B overlap if:
+        A.x < B.x + B.width AND A.x + A.width > B.x AND
+        A.y < B.y + B.height AND A.y + A.height > B.y
+   Step 4: Collect ALL matching IDs, then call updateShapesProperties with the full list
+   
+   IMPORTANT: Check ALL shapes, not just a sample. With 400 shapes, you should check all 400.
+
+6. WORKING WITH LARGE DATASETS:
+   - Canvas may have 400+ shapes - check them ALL
+   - Don't give up early or sample randomly
+   - Use proper algorithms (collision detection, distance calculation, etc.)
+   - Batch the results efficiently using array functions
+
 Example for "create 400 circles in a grid":
 - Round 1: Call getViewport() to get the visible area
 - Round 2: Call createShapes([...all 400 shape specs...]) - ONE call with all 400 shapes!
@@ -95,6 +119,15 @@ Example for "continue creating circles" (after previous grid):
 Example for "delete all small shapes":
 - Call getCanvasJSON() - finds 50 shapes smaller than threshold
 - Call deleteShapes([id1, id2, ..., id50]) - ONE call with ALL 50 IDs
+
+Example for "change all shapes touching BigCircle to red":
+- Round 1: Call getCanvasJSON() to get all shapes
+- Round 2: 
+  * Find BigCircle's position and size (x, y, width, height)
+  * Iterate through ALL shapes checking collision with BigCircle
+  * Use rectangle intersection math for each shape
+  * Collect all matching IDs (could be 100+ shapes out of 400)
+  * Call updateShapesProperties([...all matching IDs...], { fill: '#ff0000' })
 
 Example for "make the selected shapes blue" (MOST EFFICIENT):
 - Call updateSelectionProperties({ fill: '#0000ff' }) - ONE call, no need to read selection!
@@ -377,6 +410,35 @@ Example for "make the selected shapes blue" (MOST EFFICIENT):
           parameters: {
             type: 'object',
             properties: {},
+            required: [],
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'getAnnotations',
+          description: 'Get annotations with optional filters. Each annotation includes: id, shape_id, shape_name, user_id, user_email, text, and created_at timestamp. Use this to read notes/comments on shapes.',
+          parameters: {
+            type: 'object',
+            properties: {
+              shapeId: {
+                type: 'string',
+                description: 'Optional: Filter to only annotations for a specific shape ID',
+              },
+              userId: {
+                type: 'string',
+                description: 'Optional: Filter to only annotations by a specific user ID',
+              },
+              startDate: {
+                type: 'string',
+                description: 'Optional: Filter to annotations created after this ISO date string (e.g., "2024-01-01T00:00:00Z")',
+              },
+              endDate: {
+                type: 'string',
+                description: 'Optional: Filter to annotations created before this ISO date string',
+              },
+            },
             required: [],
           },
         },
@@ -781,6 +843,22 @@ Example for "make the selected shapes blue" (MOST EFFICIENT):
           });
         } else if (functionName === 'getUIState') {
           functionResult = JSON.stringify(uiState, null, 2);
+        } else if (functionName === 'getAnnotations') {
+          // Apply filters to annotations
+          let filteredAnnotations = annotations || [];
+          if (args.shapeId) {
+            filteredAnnotations = filteredAnnotations.filter((ann: any) => ann.shape_id === args.shapeId);
+          }
+          if (args.userId) {
+            filteredAnnotations = filteredAnnotations.filter((ann: any) => ann.user_id === args.userId);
+          }
+          if (args.startDate) {
+            filteredAnnotations = filteredAnnotations.filter((ann: any) => ann.created_at >= args.startDate);
+          }
+          if (args.endDate) {
+            filteredAnnotations = filteredAnnotations.filter((ann: any) => ann.created_at <= args.endDate);
+          }
+          functionResult = JSON.stringify({ annotations: filteredAnnotations, count: filteredAnnotations.length }, null, 2);
         } else if (functionName === 'createShape') {
           functionResult = JSON.stringify({ success: true, message: 'Shape created' });
           actionFunctionCalls.push({
@@ -972,6 +1050,22 @@ Example for "make the selected shapes blue" (MOST EFFICIENT):
             functionResult = JSON.stringify({ users: userCursors, count: userCursors.length }, null, 2);
           } else if (functionName === 'getUIState') {
             functionResult = JSON.stringify(uiState, null, 2);
+          } else if (functionName === 'getAnnotations') {
+            // Apply filters to annotations
+            let filteredAnnotations = annotations || [];
+            if (args.shapeId) {
+              filteredAnnotations = filteredAnnotations.filter((ann: any) => ann.shape_id === args.shapeId);
+            }
+            if (args.userId) {
+              filteredAnnotations = filteredAnnotations.filter((ann: any) => ann.user_id === args.userId);
+            }
+            if (args.startDate) {
+              filteredAnnotations = filteredAnnotations.filter((ann: any) => ann.created_at >= args.startDate);
+            }
+            if (args.endDate) {
+              filteredAnnotations = filteredAnnotations.filter((ann: any) => ann.created_at <= args.endDate);
+            }
+            functionResult = JSON.stringify({ annotations: filteredAnnotations, count: filteredAnnotations.length }, null, 2);
           } else if (functionName === 'getViewport') {
             const viewportInfo = {
               offsetX: canvasState?.centerX ? canvasState.centerX - canvasState.viewportWidth / 2 / canvasState.scale : 0,

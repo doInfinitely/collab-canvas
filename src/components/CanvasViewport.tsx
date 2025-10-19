@@ -49,6 +49,7 @@ import { useKeyboardShortcuts } from "@/hooks/canvas/useKeyboardShortcuts";
 import { usePanZoom } from "@/hooks/canvas/usePanZoom";
 import { useAIHelpers } from "@/hooks/canvas/useAIHelpers";
 import { useShapeOperations } from "@/hooks/canvas/useShapeOperations";
+import { useDataLoading } from "@/hooks/canvas/useDataLoading";
 
 type Props = { userId: string };
 
@@ -194,23 +195,6 @@ export default function CanvasViewport({ userId }: Props) {
     };
   }, []);
 
-  const [wordlists, setWordlists] = useState<{ adjs: string[]; nouns: string[] } | null>(null);
-
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      const [aRes, nRes] = await Promise.all([
-        fetch("/names/adjectives.txt"),
-        fetch("/names/nouns.txt"),
-      ]);
-      const [aText, nText] = await Promise.all([aRes.text(), nRes.text()]);
-      if (!alive) return;
-      const adjs = aText.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-      const nouns = nText.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-      setWordlists({ adjs, nouns });
-    })();
-    return () => { alive = false; };
-  }, []);
 
   // helper: TitleCase and concat
   const cap = (s: string) => s ? s[0].toUpperCase() + s.slice(1) : s;
@@ -497,6 +481,11 @@ export default function CanvasViewport({ userId }: Props) {
 
   // Live-sync
   const shapesChRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+
+  // ===== data loading hook (loads wordlists and initial shapes) =====
+  const { wordlists } = useDataLoading({
+    setShapes,
+  });
 
   // ===== shape operations hook (needs to be before shapes channel setup) =====
   const {
@@ -815,25 +804,11 @@ export default function CanvasViewport({ userId }: Props) {
     return { success: result };
   }, [restoreCanvasVersionAndClose]);
 
-  // Initial load
-  useEffect(() => {
-    let active = true;
-    (async () => {
-      const { data } = await supabase
-        .from("shapes")
-        .select("*")
-        .order("updated_at", { ascending: true });
-      if (!active || !data) return;
-      const rows = data as unknown as Shape[];
-      setShapes(new Map(rows.map((s) => [s.id, s])));
-    })();
-    return () => { active = false; };
-  }, []);
-
-  // After the existing initial shapes fetch (or in a subsequent effect)
+  // Auto-name shapes that don't have names (after wordlists load)
   useEffect(() => {
     if (!wordlists) return;
-    // find nameless shapes
+    
+    // Find nameless shapes
     const nameless = Array.from(shapesRef.current.values()).filter(s => !s.name);
     if (nameless.length === 0) return;
 
@@ -845,35 +820,41 @@ export default function CanvasViewport({ userId }: Props) {
 
     if (updates.length === 0) return;
 
-    // optimistic local update
+    // Optimistic local update
     setShapes(prev => {
       const m = new Map(prev);
       const now = nowIso();
       for (const u of updates) {
-        const cur = m.get(u.id); if (!cur) continue;
+        const cur = m.get(u.id);
+        if (!cur) continue;
         m.set(u.id, { ...cur, name: u.name, updated_at: now });
       }
       return m;
     });
 
-    // broadcast each
+    // Broadcast each update
     for (const u of updates) {
-      shapesChRef.current?.send({ type: "broadcast", event: "shape-name", payload: { id: u.id, name: u.name, updated_at: nowIso() } });
+      shapesChRef.current?.send({ 
+        type: "broadcast", 
+        event: "shape-name", 
+        payload: { id: u.id, name: u.name, updated_at: nowIso() } 
+      });
     }
 
-    // persist (batched update)
+    // Persist to database (batched update)
     (async () => {
       try {
-        // If your Supabase allows upsert-like update by array, great.
-        // Otherwise loop; keeping simple & robust:
         for (const u of updates) {
-          await supabase.from("shapes").update({ name: u.name, updated_at: nowIso() }).eq("id", u.id);
+          await supabase
+            .from("shapes")
+            .update({ name: u.name, updated_at: nowIso() })
+            .eq("id", u.id);
         }
       } catch (e) {
         console.warn("Backfill names failed:", e);
       }
     })();
-  }, [wordlists]);
+  }, [wordlists, shapesRef, shapesChRef, setShapes, randomName]);
 
   // ===== Hit test (z-aware) =====
   const pickShapeEvt = useCallback((e: React.MouseEvent<SVGSVGElement>): Shape | null => {

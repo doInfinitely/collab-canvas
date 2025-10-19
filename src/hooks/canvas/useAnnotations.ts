@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { supabase } from '@/lib/supabase/client';
 import { nowIso } from '@/lib/canvas/shapes';
+import type { Shape } from '@/types/canvas';
 
 type Annotation = {
   id: string;
@@ -16,7 +17,7 @@ type ShapeAnnotationInsert = Pick<Annotation, "id" | "shape_id" | "user_id" | "t
 
 type UseAnnotationsProps = {
   userId: string;
-  shapesRef: React.RefObject<Map<string, any>>;
+  shapesRef: React.RefObject<Map<string, Shape>>;
   selectedIdsRef: React.RefObject<Set<string>>;
   profiles: Map<string, string>;
 };

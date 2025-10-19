@@ -10,8 +10,7 @@ import {
   worldToLocal 
 } from '@/lib/canvas/geometry';
 import { resolveSides } from '@/lib/canvas/shapes';
-
-type Shape = any; // Will be inferred from parent
+import type { Shape } from '@/types/canvas';
 
 type DragState =
   | { kind: "none" }

@@ -3,19 +3,18 @@
 import { useCallback, useRef } from 'react';
 import { supabase } from '@/lib/supabase/client';
 import { nowIso } from '@/lib/canvas/shapes';
-
-type Shape = any; // Will be inferred from parent
+import type { Shape, Wordlists } from '@/types/canvas';
 
 type UseShapeCRUDProps = {
   userId: string;
   shapesRef: React.RefObject<Map<string, Shape>>;
   setShapes: (value: Map<string, Shape> | ((prev: Map<string, Shape>) => Map<string, Shape>)) => void;
-  shapesChRef: React.RefObject<any>;
+  shapesChRef: React.RefObject<ReturnType<typeof supabase.channel> | null>;
   upsertShapeLocal: (shape: Shape) => void;
   removeShapeLocal: (id: string) => void;
   frontZ: () => number;
   randomName: (adjs: string[], nouns: string[]) => string;
-  wordlists: { adjs: string[]; nouns: string[] } | null;
+  wordlists: Wordlists | null;
 };
 
 export function useShapeCRUD({

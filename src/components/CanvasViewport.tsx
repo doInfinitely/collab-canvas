@@ -7,29 +7,9 @@ import Portal from "@/components/Portal";
 import ChatBox from "@/components/ChatBox";
 
 // Utility imports
-import { 
-  HEX_RE, 
-  HEX6, 
-  normalizeHex, 
-  hexToRgb, 
-  rgbToHex, 
-  rgbToHsv, 
-  hsvToRgb, 
-  hsvToHex,
-  colorFor 
-} from "@/lib/canvas/colors";
-import { clamp, nowIso, deg, resolveSides } from "@/lib/canvas/shapes";
-import { renderMarkdown, escapeXML } from "@/lib/canvas/markdown";
-import {
-  polygonPoints,
-  shapeCenter,
-  worldToLocal,
-  pointInShape,
-  nearPerimeter,
-  getTextBoxBounds,
-  pointInTextBox,
-  nearCorner
-} from "@/lib/canvas/geometry";
+import { normalizeHex } from "@/lib/canvas/colors";
+import { nowIso, resolveSides } from "@/lib/canvas/shapes";
+import { pointInShape, nearPerimeter, pointInTextBox } from "@/lib/canvas/geometry";
 
 // Canvas sub-components
 import { DebugHUD } from "@/components/canvas/DebugHUD";
@@ -52,29 +32,9 @@ import { useShapeOperations } from "@/hooks/canvas/useShapeOperations";
 import { useDataLoading } from "@/hooks/canvas/useDataLoading";
 import { useShapeCRUD } from "@/hooks/canvas/useShapeCRUD";
 import { useMouseInteraction } from "@/hooks/canvas/useMouseInteraction";
+import type { Shape } from "@/types/canvas";
 
 type Props = { userId: string };
-
-type Shape = {
-  id: string;
-  created_by: string;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  stroke: string;
-  stroke_width: number;
-  fill: string | null;
-  updated_at?: string;
-
-  sides?: number;
-  rotation?: number;
-  z?: number;
-
-  name?: string; // NEW
-  text_md?: string;
-  text_color?: string; // NEW
-};
 
 type Annotation = {
   id: string;

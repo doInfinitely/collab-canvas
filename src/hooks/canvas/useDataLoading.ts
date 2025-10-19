@@ -2,13 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { supabase } from '@/lib/supabase/client';
-
-type Shape = any; // Will be inferred from parent
-
-type Wordlists = {
-  adjs: string[];
-  nouns: string[];
-};
+import type { Shape, Wordlists } from '@/types/canvas';
 
 type UseDataLoadingProps = {
   setShapes: (value: Map<string, Shape> | ((prev: Map<string, Shape>) => Map<string, Shape>)) => void;

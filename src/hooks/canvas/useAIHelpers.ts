@@ -1,8 +1,7 @@
 // AI helper functions for canvas interaction
 
 import { useCallback } from 'react';
-
-type Shape = any; // Will be inferred from parent
+import type { Shape } from '@/types/canvas';
 
 type UseAIHelpersProps = {
   shapesRef: React.RefObject<Map<string, Shape>>;

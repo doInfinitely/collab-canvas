@@ -3,19 +3,13 @@
 import { useCallback } from 'react';
 import { supabase } from '@/lib/supabase/client';
 import { nowIso } from '@/lib/canvas/shapes';
-
-type Shape = any; // Will be inferred from parent
-
-type Wordlists = {
-  adjs: string[];
-  nouns: string[];
-};
+import type { Shape, Wordlists } from '@/types/canvas';
 
 type UseShapeOperationsProps = {
   userId: string;
   shapesRef: React.RefObject<Map<string, Shape>>;
   setShapes: (value: Map<string, Shape> | ((prev: Map<string, Shape>) => Map<string, Shape>)) => void;
-  shapesChRef: React.RefObject<any>;
+  shapesChRef: React.RefObject<ReturnType<typeof supabase.channel> | null>;
   wordlists: Wordlists | null;
   selectedIds: Set<string>;
   setSelectedIds: (value: Set<string> | ((prev: Set<string>) => Set<string>)) => void;

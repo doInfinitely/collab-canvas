@@ -1,17 +1,16 @@
 // Canvas versioning and export functionality
 
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { supabase } from '@/lib/supabase/client';
 import { nowIso, resolveSides, deg } from '@/lib/canvas/shapes';
 import { shapeCenter, getTextBoxBounds, polygonPoints } from '@/lib/canvas/geometry';
 import { renderMarkdown } from '@/lib/canvas/markdown';
 import { HEX_RE } from '@/lib/canvas/colors';
+import type { Shape } from '@/types/canvas';
 
 const GRID_SIZE = 20;
 const DOT_RADIUS = 1.5;
 const DOT_COLOR = "rgba(0,0,0,0.15)";
-
-type Shape = any; // Will be inferred from parent component
 
 type CanvasVersion = {
   id: string;

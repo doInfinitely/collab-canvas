@@ -3,8 +3,7 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { supabase } from '@/lib/supabase/client';
 import { nowIso } from '@/lib/canvas/shapes';
-
-type Shape = any; // Will be inferred from parent
+import type { Shape } from '@/types/canvas';
 
 type UseKeyboardShortcutsProps = {
   userId: string;
@@ -13,7 +12,7 @@ type UseKeyboardShortcutsProps = {
   offsetRef: React.RefObject<{ x: number; y: number }>;
   scaleRef: React.RefObject<number>;
   screenCursorRef: React.RefObject<{ x: number; y: number }>;
-  shapesChRef: React.RefObject<any>;
+  shapesChRef: React.RefObject<ReturnType<typeof supabase.channel> | null>;
   setShapes: (fn: (prev: Map<string, Shape>) => Map<string, Shape>) => void;
   setSelectedIds: (fn: (prev: Set<string>) => Set<string>) => void;
   setShowDebug: (fn: (prev: boolean) => boolean) => void;

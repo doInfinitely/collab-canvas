@@ -50,6 +50,7 @@ import { usePanZoom } from "@/hooks/canvas/usePanZoom";
 import { useAIHelpers } from "@/hooks/canvas/useAIHelpers";
 import { useShapeOperations } from "@/hooks/canvas/useShapeOperations";
 import { useDataLoading } from "@/hooks/canvas/useDataLoading";
+import { useShapeCRUD } from "@/hooks/canvas/useShapeCRUD";
 
 type Props = { userId: string };
 
@@ -511,6 +512,29 @@ export default function CanvasViewport({ userId }: Props) {
     selectedIds,
     setSelectedIds,
   });
+
+  // ===== shape CRUD hook =====
+  const {
+    createShape,
+    deleteShapes,
+    updateShapePosition,
+    updateShapesPositions,
+    updateShapeSize,
+    updateShapeRotation,
+    updateShapeText,
+    schedulePersist,
+  } = useShapeCRUD({
+    userId,
+    shapesRef,
+    setShapes,
+    shapesChRef,
+    upsertShapeLocal,
+    removeShapeLocal,
+    frontZ,
+    randomName,
+    wordlists,
+  });
+
   useEffect(() => {
     const ch = supabase.channel("broadcast:shapes", { config: { broadcast: { self: false } } });
     shapesChRef.current = ch;
@@ -894,15 +918,6 @@ export default function CanvasViewport({ userId }: Props) {
 
   const [drag, setDrag] = useState<DragState>({ kind: "none" });
 
-  const moveRAF = useRef<number | null>(null);
-  const scheduleMoveUpdate = (fn: () => void) => {
-    if (moveRAF.current != null) return;
-    moveRAF.current = requestAnimationFrame(() => {
-      moveRAF.current = null;
-      fn();
-    });
-  };
-
   const cursorForPerimeter = (s: Shape, wx: number, wy: number, modForRotate: boolean) => {
     if (modForRotate) return "grab" as const;
     const sides = resolveSides(s.sides);
@@ -1037,19 +1052,12 @@ export default function CanvasViewport({ userId }: Props) {
     if (multiDragRef.current) {
       const dx = (e.clientX - multiDragRef.current.startMouseX) / scaleRef.current;
       const dy = (e.clientY - multiDragRef.current.startMouseY) / scaleRef.current;
-      setShapes(prev => {
-        const m = new Map(prev);
-        for (const { id, x, y } of multiDragRef.current!.starts) {
-          const s = m.get(id); if (!s) continue;
-          m.set(id, { ...s, x: Math.round(x + dx), y: Math.round(y + dy), updated_at: nowIso() });
-        }
-        return m;
-      });
-      for (const { id, x, y } of multiDragRef.current.starts) {
-        const nx = Math.round(x + dx), ny = Math.round(y + dy);
-        shapesChRef.current?.send({ type: "broadcast", event: "shape-move", payload: { id, x: nx, y: ny, updated_at: nowIso() } });
-        scheduleMoveUpdate(async () => { await supabase.from("shapes").update({ x: nx, y: ny, updated_at: nowIso() }).eq("id", id); });
-      }
+      const updates = multiDragRef.current.starts.map(({ id, x, y }) => ({
+        id,
+        x: x + dx,
+        y: y + dy,
+      }));
+      updateShapesPositions(updates);
       return;
     }
 
@@ -1061,16 +1069,7 @@ export default function CanvasViewport({ userId }: Props) {
     if (drag.kind === "moving") {
       const newX = wx - drag.grabOffset.dx;
       const newY = wy - drag.grabOffset.dy;
-      setShapes(prev => {
-        const m = new Map(prev);
-        const s = m.get(drag.id); if (!s) return prev;
-        m.set(drag.id, { ...s, x: Math.round(newX), y: Math.round(newY) });
-        return m;
-      });
-      shapesChRef.current?.send({ type: "broadcast", event: "shape-move", payload: { id: drag.id, x: Math.round(newX), y: Math.round(newY), updated_at: nowIso() } });
-      scheduleMoveUpdate(async () => {
-        await supabase.from("shapes").update({ x: Math.round(newX), y: Math.round(newY), updated_at: nowIso() }).eq("id", drag.id);
-      });
+      updateShapePosition(drag.id, newX, newY);
       return;
     }
 
@@ -1107,24 +1106,7 @@ export default function CanvasViewport({ userId }: Props) {
       const nx = Math.round(cx - newW / 2);
       const ny = Math.round(cy - newH / 2);
 
-      setShapes(prev => {
-        const m = new Map(prev);
-        const cur = m.get(drag.id); if (!cur) return prev;
-        m.set(drag.id, { ...cur, x: nx, y: ny, width: newW, height: newH, updated_at: nowIso() });
-        return m;
-      });
-
-      shapesChRef.current?.send({
-        type: "broadcast",
-        event: "shape-resize",
-        payload: { id: drag.id, x: nx, y: ny, width: newW, height: newH, updated_at: nowIso() },
-      });
-
-      scheduleMoveUpdate(async () => {
-        await supabase.from("shapes")
-          .update({ x: nx, y: ny, width: newW, height: newH, updated_at: nowIso() })
-          .eq("id", drag.id);
-      });
+      updateShapeSize(drag.id, nx, ny, newW, newH);
       return;
     }
 
@@ -1134,19 +1116,10 @@ export default function CanvasViewport({ userId }: Props) {
       const { cx, cy } = shapeCenter(s0);
       const ang = Math.atan2(wy - cy, wx - cx);
       const newRot = drag.initialRot + (ang - drag.startAngle);
-      setShapes(prev => {
-        const m = new Map(prev);
-        const cur = m.get(drag.id); if (!cur) return prev;
-        m.set(drag.id, { ...cur, rotation: newRot, updated_at: nowIso() });
-        return m;
-      });
-      shapesChRef.current?.send({ type: "broadcast", event: "shape-rotate", payload: { id: drag.id, rotation: newRot, updated_at: nowIso() } });
-      scheduleMoveUpdate(async () => {
-        await supabase.from("shapes").update({ rotation: newRot, updated_at: nowIso() }).eq("id", drag.id);
-      });
+      updateShapeRotation(drag.id, newRot);
       return;
     }
-  }, [drag, marquee, worldFromSvgEvent]);
+  }, [drag, marquee, worldFromSvgEvent, updateShapesPositions, updateShapePosition, updateShapeSize, updateShapeRotation]);
 
   const onLeftUp = useCallback(async (e: React.MouseEvent<SVGSVGElement>) => {
     // Check for text click FIRST (only if it was a click, not a drag)
@@ -1207,20 +1180,7 @@ export default function CanvasViewport({ userId }: Props) {
       const nw = Math.abs(w), nh = Math.abs(h);
       setDrag({ kind: "none" });
       if (nw >= 3 && nh >= 3) {
-        const id = (typeof crypto !== "undefined" && "randomUUID" in crypto) ? crypto.randomUUID() : `shape_${Math.random().toString(36).slice(2)}`;
-        const name = wordlists ? randomName(wordlists.adjs, wordlists.nouns) : undefined;
-        const shape: Shape = {
-          id, created_by: userId,
-          x: nx, y: ny, width: nw, height: nh,
-          stroke: "#000000", stroke_width: 2, fill: "#ffffff",
-          updated_at: nowIso(), sides: 4, rotation: 0, z: frontZ(),
-          name,
-          text_color: "#000000", // ADD THIS
-        };
-        upsertShapeLocal(shape);
-        shapesChRef.current?.send({ type: "broadcast", event: "shape-create", payload: shape });
-        const { error } = await supabase.from("shapes").insert(shape);
-        if (error) { console.warn("DB insert failed, rolling back local:", error); removeShapeLocal(id); }
+        await createShape({ x: nx, y: ny, width: nw, height: nh });
       }
       return;
     }
@@ -1228,7 +1188,7 @@ export default function CanvasViewport({ userId }: Props) {
     if (drag.kind === "moving" || drag.kind === "resizing" || drag.kind === "rotating") {
       setDrag({ kind: "none" });
     }
-  }, [drag, marquee, shapes, userId, upsertShapeLocal, removeShapeLocal, worldFromSvgEvent, wordlists]);
+  }, [drag, marquee, shapes, worldFromSvgEvent, createShape]);
 
   // ===== Double-click delete =====
   const onDoubleClickSVG = useCallback(async (e: React.MouseEvent<SVGSVGElement>) => {
@@ -1238,14 +1198,9 @@ export default function CanvasViewport({ userId }: Props) {
     const hit = pickShapeEvt(e);
     if (!hit) return;
     const idsToDelete = selectedIds.has(hit.id) ? Array.from(selectedIds) : [hit.id];
-    const toRestore = idsToDelete.map((id) => shapesRef.current.get(id)).filter(Boolean) as Shape[];
-    setShapes(prev => { const m = new Map(prev); for (const id of idsToDelete) m.delete(id); return m; });
-    for (const id of idsToDelete) shapesChRef.current?.send({ type: "broadcast", event: "shape-delete", payload: { id } });
-    const { error } = await supabase.from("shapes").delete().in("id", idsToDelete);
-    if (error) {
-      console.warn("Batch delete failed:", error.message);
-      setShapes(prev => { const m = new Map(prev); for (const s of toRestore) m.set(s.id, s); return m; });
-    } else {
+    
+    const success = await deleteShapes(idsToDelete);
+    if (success) {
       setSelectedIds(new Set());
     }
     
@@ -1253,7 +1208,7 @@ export default function CanvasViewport({ userId }: Props) {
     setTimeout(() => {
       dblClickRef.current = false;
     }, 300);
-  }, [drag, pickShapeEvt, selectedIds]);
+  }, [drag, pickShapeEvt, selectedIds, deleteShapes]);
 
   // ===== COPY / CUT / PASTE =====
   const handleTextChange = useCallback((text: string) => {
@@ -1263,27 +1218,9 @@ export default function CanvasViewport({ userId }: Props) {
     
     textDebounceRef.current = setTimeout(() => {
       if (!editingTextId) return;
-      
-      const now = nowIso();
-      setShapes(prev => {
-        const m = new Map(prev);
-        const s = m.get(editingTextId);
-        if (!s) return prev;
-        m.set(editingTextId, { ...s, text_md: text, updated_at: now });
-        return m;
-      });
-
-      shapesChRef.current?.send({
-        type: "broadcast",
-        event: "shape-text",
-        payload: { id: editingTextId, text_md: text, updated_at: now }
-      });
-
-      (async () => {
-        await supabase.from("shapes").update({ text_md: text, updated_at: now }).eq("id", editingTextId);
-      })();
+      updateShapeText(editingTextId, text);
     }, 250);
-  }, [editingTextId]);
+  }, [editingTextId, updateShapeText]);
 
   const handleTextBlur = useCallback(() => {
     if (textDebounceRef.current) {

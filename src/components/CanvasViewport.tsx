@@ -45,6 +45,7 @@ import { useColorPicker } from "@/hooks/canvas/useColorPicker";
 import { usePresence } from "@/hooks/canvas/usePresence";
 import { useAnnotations } from "@/hooks/canvas/useAnnotations";
 import { useCanvasVersioning } from "@/hooks/canvas/useCanvasVersioning";
+import { useKeyboardShortcuts } from "@/hooks/canvas/useKeyboardShortcuts";
 
 type Props = { userId: string };
 
@@ -126,7 +127,6 @@ export default function CanvasViewport({ userId }: Props) {
     startX: number; startY: number; curX: number; curY: number;
   }>(null);
 
-  const clipboardRef = useRef<Shape[] | null>(null);
   const dblClickRef = useRef(false);
 
   const [editingTextId, setEditingTextId] = useState<string | null>(null);
@@ -1364,26 +1364,20 @@ export default function CanvasViewport({ userId }: Props) {
     };
   }, [modalShapeId, showDebug, showCanvasMenu, canvasMenuTab, canvasVersions, profiles]);
 
-  // AI-callable keyboard handlers - after versioning hook
-  const keyboardExportPNG = useCallback(async () => {
-    exportAsPNG();
-    return { success: true };
-  }, [exportAsPNG]);
-
-  const keyboardExportSVG = useCallback(async () => {
-    exportAsSVG();
-    return { success: true };
-  }, [exportAsSVG]);
-
-  const keyboardExportJSON = useCallback(async () => {
-    exportAsJSON();
-    return { success: true };
-  }, [exportAsJSON]);
-
-  const keyboardSaveVersion = useCallback(async () => {
-    const result = await saveCanvasVersion();
-    return { success: result };
-  }, [saveCanvasVersion]);
+  // ===== keyboard shortcuts hook =====
+  useKeyboardShortcuts({
+    userId,
+    shapesRef,
+    selectedIdsRef,
+    offsetRef,
+    scaleRef,
+    screenCursorRef,
+    shapesChRef,
+    setShapes,
+    setSelectedIds,
+    setShowDebug,
+    setShowCanvasMenu,
+  });
 
   // AI: Restore version
   const aiRestoreVersion = useCallback(async (identifier: string | number) => {
@@ -1902,97 +1896,6 @@ export default function CanvasViewport({ userId }: Props) {
   }, [drag, pickShapeEvt, selectedIds]);
 
   // ===== COPY / CUT / PASTE =====
-  const worldCursor = () => ({
-    x: offsetRef.current.x + screenCursorRef.current.x / scaleRef.current,
-    y: offsetRef.current.y + screenCursorRef.current.y / scaleRef.current,
-  });
-
-  const bboxOf = (items: Shape[]) => {
-    if (items.length === 0) return null;
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const s of items) {
-      const x1 = Math.min(s.x, s.x + s.width);
-      const y1 = Math.min(s.y, s.y + s.height);
-      const x2 = Math.max(s.x, s.x + s.width);
-      const y2 = Math.max(s.y, s.y + s.height);
-      if (x1 < minX) minX = x1;
-      if (y1 < minY) minY = y1;
-      if (x2 > maxX) maxX = x2;
-      if (y2 > maxY) maxY = y2;
-    }
-    return { minX, minY, maxX, maxY, cx: (minX + maxX) / 2, cy: (minY + maxY) / 2 };
-  };
-
-  const doCopy = useCallback(() => {
-    const ids = Array.from(selectedIdsRef.current);
-    if (ids.length === 0) return;
-    const shapesToCopy = ids.map((id) => shapesRef.current.get(id)).filter(Boolean) as Shape[];
-    clipboardRef.current = shapesToCopy.map(s => ({ ...s }));
-  }, []);
-
-  const doCut = useCallback(async () => {
-    const ids = Array.from(selectedIdsRef.current);
-    if (ids.length === 0) return;
-    const shapesToCut = ids.map((id) => shapesRef.current.get(id)).filter(Boolean) as Shape[];
-    clipboardRef.current = shapesToCut.map(s => ({ ...s }));
-    setShapes(prev => { const m = new Map(prev); for (const id of ids) m.delete(id); return m; });
-    for (const id of ids) shapesChRef.current?.send({ type: "broadcast", event: "shape-delete", payload: { id } });
-    const { error } = await supabase.from("shapes").delete().in("id", ids);
-    if (error) {
-      console.warn("Cut delete failed:", error.message);
-      setShapes(prev => { const m = new Map(prev); for (const s of shapesToCut) m.set(s.id, s); return m; });
-    }
-    setSelectedIds(new Set());
-  }, []);
-
-  const doPaste = useCallback(async () => {
-    const clip = clipboardRef.current;
-    if (!clip || clip.length === 0) return;
-    const target = worldCursor();
-    const bb = bboxOf(clip);
-    if (!bb) return;
-    const dx = target.x - bb.cx;
-    const dy = target.y - bb.cy;
-    const now = nowIso();
-    const newShapes: Shape[] = clip.map((s) => ({
-      ...s,
-      id: (typeof crypto !== "undefined" && "randomUUID" in crypto) ? crypto.randomUUID() : `shape_${Math.random().toString(36).slice(2)}`,
-      created_by: userId,
-      x: Math.round(s.x + dx),
-      y: Math.round(s.y + dy),
-      updated_at: now,
-    }));
-    setShapes(prev => { const m = new Map(prev); for (const s of newShapes) m.set(s.id, s); return m; });
-    for (const s of newShapes) shapesChRef.current?.send({ type: "broadcast", event: "shape-create", payload: s });
-    const { error } = await supabase.from("shapes").insert(newShapes);
-    if (error) {
-      console.warn("Paste insert failed:", error.message);
-      setShapes(prev => { const m = new Map(prev); for (const s of newShapes) m.delete(s.id); return m; });
-      return;
-    }
-    setSelectedIds(new Set(newShapes.map((s) => s.id)));
-  }, [userId]);
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement | null;
-      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
-
-      if (e.key === "?" || (e.key === "/" && e.shiftKey)) {
-        e.preventDefault(); setShowDebug(v => !v); return;
-      }
-
-      const mod = e.metaKey || e.ctrlKey;
-      if (!mod) return;
-      const k = e.key.toLowerCase();
-      if (k === "c") { e.preventDefault(); doCopy(); }
-      else if (k === "x") { e.preventDefault(); void doCut(); }
-      else if (k === "v") { e.preventDefault(); void doPaste(); }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [doCopy, doCut, doPaste]);
-
   const handleTextChange = useCallback((text: string) => {
     setEditingText(text);
     
@@ -2283,12 +2186,9 @@ export default function CanvasViewport({ userId }: Props) {
       // close on left click outside
       if ((e as MouseEvent).button === 0) setShowCanvasMenu(false);
     };
-    const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') setShowCanvasMenu(false); };
     window.addEventListener('mousedown', close);
-    window.addEventListener('keydown', esc);
     return () => {
       window.removeEventListener('mousedown', close);
-      window.removeEventListener('keydown', esc);
     };
   }, []);
 

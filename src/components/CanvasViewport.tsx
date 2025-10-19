@@ -31,6 +31,15 @@ import {
   nearCorner
 } from "@/lib/canvas/geometry";
 
+// Canvas sub-components
+import { DebugHUD } from "@/components/canvas/DebugHUD";
+import { MultiplayerCursors } from "@/components/canvas/MultiplayerCursors";
+import { TextEditorOverlay } from "@/components/canvas/TextEditorOverlay";
+import { CanvasContextMenu } from "@/components/canvas/CanvasContextMenu";
+import { ShapeRenderer } from "@/components/canvas/ShapeRenderer";
+import { ColorPickerPopover } from "@/components/canvas/ColorPickerPopover";
+import { ShapePropertiesModal } from "@/components/canvas/ShapePropertiesModal";
+
 type Props = { userId: string };
 
 type Shape = {
@@ -2949,86 +2958,16 @@ export default function CanvasViewport({ userId }: Props) {
           </filter>
         </defs>
         <g transform={`translate(${-offset.x * scale}, ${-offset.y * scale}) scale(${scale})`}>
-          {shapeOrdered.map((s) => {
-            // Coerce sides to a number (export can see "6" as a string)
-            const rawSides = (typeof s.sides === "number") ? s.sides : parseInt(String(s.sides ?? ""), 10);
-            const sides = resolveSides(Number.isFinite(rawSides) ? rawSides : undefined);
-            const x = Math.min(s.x, s.x + s.width);
-            const y = Math.min(s.y, s.y + s.height);
-            const w = Math.abs(s.width);
-            const h = Math.abs(s.height);
-            const strokeW = s.stroke_width / scale;
-            const rotDeg = deg(s.rotation ?? 0);
-            const { cx, cy } = shapeCenter(s);
-
-            const shapeProps = {
-              fill: s.fill ?? "transparent",
-              stroke: s.stroke,
-              strokeWidth: strokeW,
-              pointerEvents: "all" as const,
-              style: { cursor: "inherit" },
-              filter: selectedIds.has(s.id) ? "url(#selGlow)" : undefined,
-              transform: rotDeg ? `rotate(${rotDeg} ${cx} ${cy})` : undefined,
-            };
-
-            const isEditing = editingTextId === s.id;
-
-            // ---- text_md-in-SVG (foreignObject) setup ----
-            const hasMD = !!(s.text_md && s.text_md.trim());
-            const { boxW, boxH } = getTextBoxBounds(s); // your existing helper
-            const boxX = cx - boxW / 2;                 // world coords
-            const boxY = cy - boxH / 2;                 // world coords
-            const foFontSize = Math.max(10, 14 / scale); // screen-stable sizing
-            const textColor =
-              s.text_color && HEX_RE.test(s.text_color) ? s.text_color : "#000000";
-
-            let node: React.ReactNode;
-            if (sides === 4) {
-              node = <rect x={x} y={y} width={w} height={h} {...shapeProps} />;
-            } else if (sides === 0) {
-              node = <ellipse cx={x + w / 2} cy={y + h / 2} rx={w / 2} ry={h / 2} {...shapeProps} />;
-            } else {
-              node = <polygon points={polygonPoints(x, y, w, h, sides)} {...shapeProps} />;
-            }
-
-            return (
-              <g
-                key={s.id}
-                data-shape-id={s.id}
-                onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); openModalForShape(s.id); }}
-              >
-                {/* shape path */}
-                {node}
-
-                {/* text_md rendered inside the same group so it shares z-index */}
-                {hasMD && !isEditing && (
-                  <foreignObject
-                    x={boxX}
-                    y={boxY}
-                    width={boxW}
-                    height={boxH}
-                    transform={rotDeg ? `rotate(${rotDeg} ${cx} ${cy})` : undefined}
-                    style={{ pointerEvents: "none" }} // display only; editing uses HTML overlay
-                    requiredExtensions="http://www.w3.org/1999/xhtml" // optional, OK on <foreignObject>
-                  >
-                    <div
-                      style={{
-                        width: "100%",
-                        height: "100%",
-                        overflow: "hidden", // clip to box; switch to 'auto' if you want scrollbars
-                        color: textColor,
-                        fontSize: `${foFontSize}px`,
-                        lineHeight: "1.25",
-                        fontFamily:
-                          "ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica Neue, Arial",
-                      }}
-                      dangerouslySetInnerHTML={{ __html: renderMarkdown(s.text_md!) }}
-                    />
-                  </foreignObject>
-                )}
-              </g>
-            );
-          })}
+          {shapeOrdered.map((s) => (
+            <ShapeRenderer
+              key={s.id}
+              shape={s}
+              scale={scale}
+              isSelected={selectedIds.has(s.id)}
+              isEditing={editingTextId === s.id}
+              onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); openModalForShape(s.id); }}
+            />
+          ))}
 
           {drag.kind === "creating" && (
             <rect
@@ -3067,68 +3006,17 @@ export default function CanvasViewport({ userId }: Props) {
         })()}
       </svg>
       {/* Text boxes overlay (editing only) */}
-      <div className="absolute inset-0 pointer-events-none z-20">
-        {shapeOrdered.map((s) => {
-          const isEditing = editingTextId === s.id;
-          if (!isEditing) return null;
-
-          const { cx, cy } = shapeCenter(s);
-          const { boxW, boxH } = getTextBoxBounds(s);
-
-          const screenX = (cx - offset.x) * scale;
-          const screenY = (cy - offset.y) * scale;
-          const screenW = boxW * scale;
-          const screenH = boxH * scale;
-
-          const zForEditor = 1000 + (Number.isFinite(s.z as number) ? (s.z as number) : 0);
-
-          return (
-            <div
-              key={`text-editor-${s.id}`}
-              className="absolute"
-              style={{
-                left: screenX - screenW / 2,
-                top: screenY - screenH / 2,
-                width: screenW,
-                height: screenH,
-                pointerEvents: "auto",
-                zIndex: zForEditor,
-              }}
-              onClick={(e) => e.stopPropagation()}
-              onMouseDown={(e) => e.stopPropagation()}
-            >
-              <textarea
-                className="w-full h-full p-2 text-sm border-2 border-blue-500 rounded bg-white resize-none outline-none"
-                style={{ fontSize: Math.max(10, 14 * scale) }}
-                value={editingText}
-                onChange={(e) => handleTextChange(e.target.value)}
-                onBlur={handleTextBlur}
-                autoFocus
-              />
-            </div>
-          );
-        })}
-      </div>
+      <TextEditorOverlay
+        shapes={shapeOrdered}
+        editingTextId={editingTextId}
+        editingText={editingText}
+        offset={offset}
+        scale={scale}
+        onTextChange={handleTextChange}
+        onTextBlur={handleTextBlur}
+      />
       {/* Multiplayer cursors */}
-      <div className="absolute inset-0 pointer-events-none">
-        {Array.from(remoteCursors.entries()).map(([uid, rc]) => {
-          const sx = rc.worldX - offsetRef.current.x;
-          const sy = rc.worldY - offsetRef.current.y;
-          const email = profiles.get(uid) ?? uid.slice(0, 6);
-          const color = colorFor(uid);
-          return (
-            <div key={uid} className="absolute" style={{ transform: `translate(${sx}px, ${sy}px)` }}>
-              <svg width="14" height="20" viewBox="0 0 14 20" className="drop-shadow" style={{ display: "block" }}>
-                <path d="M1 1 L13 9 L8 10 L9.5 18 L6.5 18 L5 10 L1 9 Z" fill={color} opacity={0.95}/>
-                <path d="M1 1 L13 9 L8 10 L9.5 18 L6.5 18 L5 10 L1 9 Z" fill="none" stroke="black" strokeWidth="0.75"/>
-              </svg>
-              <div className="mt-[-2px] ml-[10px] rounded px-2 py-0.5 text-[11px] leading-[14px] text-white shadow" style={{ backgroundColor: color }}>
-                {email}
-              </div>
-            </div>
-          );
-        })}
-      </div>
+      <MultiplayerCursors remoteCursors={remoteCursors} offset={offsetRef.current} profiles={profiles} />
 
       {/* Hover name label */}
       {hoveredId && (() => {
@@ -3157,505 +3045,70 @@ export default function CanvasViewport({ userId }: Props) {
         const s = shapesRef.current.get(modalShapeId);
         const email = profiles.get(userId) ?? userId;
         if (!s) return null;
-        const ownerEmail = profiles.get(s.created_by) ?? s.created_by; // NEW
+        const ownerEmail = profiles.get(s.created_by) ?? s.created_by;
         const anns = annotationsByShape.get(modalShapeId) ?? [];
         return (
-          <div className="absolute inset-0 z-50 flex items-center justify-center" aria-modal role="dialog">
-            <div className="absolute inset-0 bg-black/40" onClick={closeModal} />
-            <div className="relative z-10 w-[660px] max-w-[92vw] rounded-2xl bg-white p-5 shadow-xl">
-              <div className="mb-3 flex items-center justify-between">
-                <div>
-                  <h2 className="text-lg font-semibold">
-                    Shape Properties{ s.name ? ` — ${s.name}` : "" /* show name if present */ }
-                  </h2>
-                  {!s.name && (
-                    <div className="text-xs text-gray-500">(unnamed)</div>
-                  )}
-                </div>
-                <button
-                  className="rounded-md px-2 py-1 text-sm text-gray-600 hover:bg-gray-100"
-                  onClick={closeModal}
-                  aria-label="Close properties"
-                >
-                  ✕
-                </button>
-              </div>
-
-              {/* Basic */}
-              <div className="grid grid-cols-2 gap-3 text-sm">
-                <div><span className="text-gray-500">ID:</span> {s.id}</div>
-                <div><span className="text-gray-500">Owner:</span> {ownerEmail}</div> {/* CHANGED */}
-                <div><span className="text-gray-500">X:</span> {s.x}</div>
-                <div><span className="text-gray-500">Y:</span> {s.y}</div>
-                <div><span className="text-gray-500">Width:</span> {s.width}</div>
-                <div><span className="text-gray-500">Height:</span> {s.height}</div>
-                <div><span className="text-gray-500">Rotation:</span> {Math.round(deg(s.rotation ?? 0))}°</div>
-                <div><span className="text-gray-500">Updated:</span> {s.updated_at ? new Date(s.updated_at).toLocaleString() : "—"}</div>
-              </div>
-
-              {/* Layering */}
-              <div className="mt-4">
-                <h3 className="mb-2 text-sm font-medium">Layering</h3>
-                <div className="flex flex-wrap items-end gap-3">
-                  <div className="flex gap-2">
-                    <button
-                      className="rounded-md border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50"
-                      onClick={sendToFront}
-                    >
-                      Send to front
-                    </button>
-                    <button
-                      className="rounded-md border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50"
-                      onClick={sendToBack}
-                    >
-                      Send to back
-                    </button>
-                  </div>
-
-                  {/* exact z-index setter */}
-                  <div className="ml-auto flex items-end gap-2">
-                    <div>
-                      <label className="mb-1 block text-xs text-gray-600">Z-index (integer)</label>
-                      <input
-                        type="number"
-                        step={1}
-                        className="w-28 rounded-md border border-gray-300 px-2 py-1.5 text-sm outline-none focus:border-blue-500"
-                        value={zIndexInput}
-                        onChange={(e) => setZIndexInput(e.target.value)}
-                        onBlur={(e) => {
-                          // sanitize to integer on blur
-                          const n = Math.round(Number(e.target.value));
-                          if (Number.isFinite(n)) setZIndexInput(String(n));
-                        }}
-                      />
-                    </div>
-                    <button
-                      className="h-9 shrink-0 rounded-md bg-blue-600 px-3 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-                      onClick={saveZIndex}
-                      disabled={!Number.isFinite(Number(zIndexInput))}
-                      title={
-                        selectedIds.size > 0 && selectedIds.has(modalShapeId!)
-                          ? `Apply to ${selectedIds.size} selected`
-                          : "Apply to this shape"
-                      }
-                    >
-                      Set Z
-                    </button>
-                  </div>
-                </div>
-
-                {selectedIds.size > 0 && selectedIds.has(modalShapeId!) && (
-                  <div className="mt-1 text-xs text-gray-500">
-                    Applies to {selectedIds.size} selected shape{selectedIds.size > 1 ? "s" : ""}.
-                  </div>
-                )}
-              </div>
-
-              {/* Geometry */}
-              <div className="mt-4">
-                <h3 className="mb-2 text-sm font-medium">Geometry</h3>
-                <div className="flex items-end gap-3">
-                  <div className="grow">
-                    <label className="mb-1 block text-xs text-gray-600">Number of sides (0 = ellipse, 3+ = polygon)</label>
-                    <input
-                      type="number"
-                      inputMode="numeric"
-                      min={0}
-                      step={1}
-                      className="w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm outline-none focus:border-blue-500"
-                      value={sidesInput}
-                      onChange={(e) => setSidesInput(e.target.value)}
-                      onBlur={(e) => {
-                        const v = Number(e.target.value);
-                        if (!(v === 0 || v >= 3)) {
-                          const current = shapesRef.current.get(modalShapeId!);
-                          setSidesInput(String(resolveSides(current?.sides)));
-                        }
-                      }}
-                    />
-                  </div>
-                  <button
-                    className="h-9 shrink-0 rounded-md bg-blue-600 px-3 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-                    onClick={saveSides}
-                    disabled={(() => { const v = Number(sidesInput); return !(v === 0 || v >= 3); })()}
-                  >Save sides</button>
-                </div>
-                {selectedIds.size > 0 && selectedIds.has(modalShapeId!) && (
-                  <div className="mt-1 text-xs text-gray-500">
-                    Applies to {selectedIds.size} selected shape{selectedIds.size > 1 ? "s" : ""}.
-                  </div>
-                )}
-              </div>
-
-              {/* Style */}
-              <div className="mt-5">
-                <h3 className="mb-2 text-sm font-medium">Style</h3>
-
-                {/* Stroke width */}
-                <div className="mb-3 flex items-end gap-3">
-                  <div className="w-44">
-                    <label className="mb-1 block text-xs text-gray-600">Stroke width (px)</label>
-                    <input
-                      type="number"
-                      step="0.5"
-                      min={0.5}
-                      className="w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm outline-none focus:border-blue-500"
-                      value={strokeWidthInput}
-                      onChange={(e) => setStrokeWidthInput(e.target.value)}
-                      onFocus={() => setLastColorTarget("stroke")}
-                    />
-                  </div>
-                </div>
-
-                {/* Stroke color */}
-                <div className="mb-3 grid grid-cols-[1fr_auto] items-end gap-3">
-                  <div>
-                    <label className="mb-1 block text-xs text-gray-600">Stroke color (hex)</label>
-                    <div className="flex items-center gap-3">
-                      <input
-                        className={`w-full rounded-md border px-2 py-1.5 text-sm outline-none ${HEX_RE.test(strokeColorInput) ? "border-gray-300 focus:border-blue-500" : "border-red-400 focus:border-red-500"}`}
-                        placeholder="#000000"
-                        value={strokeColorInput}
-                        onChange={(e) => setStrokeColorInput(e.target.value)}
-                        onFocus={() => setLastColorTarget("stroke")}
-                      />
-                      <button
-                        type="button"
-                        className="aspect-square w-12 rounded border border-gray-300"  // was: "h-9 w-12 ..."
-                        style={{
-                          background: HEX_RE.test(strokeColorInput)
-                            ? strokeColorInput
-                            : "repeating-conic-gradient(#ddd 0% 25%, #fff 0% 50%) 50%/10px 10px"
-                        }}
-                        onClick={(e) => {
-                          const rect = (e.currentTarget as HTMLButtonElement).getBoundingClientRect();
-                          setLastColorTarget("stroke");
-
-                          const safeInitial = HEX6.test(strokeColorInput) ? strokeColorInput : "#000000"; // fallback
-                          setPicker({
-                            for: "stroke",
-                            x: rect.left + window.scrollX,
-                            y: rect.bottom + 6 + window.scrollY,
-                            initial: safeInitial,   // NEW
-                          });
-                        }}
-                        title="Pick stroke color"
-                      />
-                    </div>
-                    {!HEX_RE.test(strokeColorInput) && (
-                      <div className="mt-1 text-xs text-red-600">Enter a valid hex like #ffcc00 or #fc0</div>
-                    )}
-                  </div>
-                  <div className="self-center text-xs text-gray-500">Preview</div>
-                </div>
-
-                {/* Fill color */}
-                <div className="mb-3 grid grid-cols-[1fr_auto] items-end gap-3">
-                  <div>
-                    <div className="mb-1 flex items-center justify-between">
-                      <label className="block text-xs text-gray-600">Fill color (hex)</label>
-                      <label className="flex select-none items-center gap-2 text-xs text-gray-600">
-                        <input
-                          type="checkbox"
-                          checked={noFill}
-                          onChange={(e) => { setNoFill(e.target.checked); setLastColorTarget("fill"); }}
-                        />
-                        No fill (transparent)
-                      </label>
-                    </div>
-                    <div className="flex items-center gap-3">
-                      <input
-                        className={`w-full rounded-md border px-2 py-1.5 text-sm outline-none ${noFill || HEX_RE.test(fillColorInput) ? "border-gray-300 focus:border-blue-500" : "border-red-400 focus:border-red-500"}`}
-                        placeholder="#ffffff"
-                        value={fillColorInput}
-                        onChange={(e) => setFillColorInput(e.target.value)}
-                        onFocus={() => setLastColorTarget("fill")}
-                        disabled={noFill}
-                      />
-                      <button
-                        type="button"
-                        className="aspect-square w-12 rounded border border-gray-300"  // was: "h-9 w-12 ..."
-                        style={{
-                          background: noFill
-                            ? "repeating-conic-gradient(#ddd 0% 25%, #fff 0% 50%) 50%/10px 10px"
-                            : (HEX_RE.test(fillColorInput) ? fillColorInput : "repeating-conic-gradient(#ddd 0% 25%, #fff 0% 50%) 50%/10px 10px")
-                        }}
-                        onClick={(e) => {
-                          if (noFill) setNoFill(false);
-                          const rect = (e.currentTarget as HTMLButtonElement).getBoundingClientRect();
-                          setLastColorTarget("fill");
-
-                          const safeInitial = noFill
-                            ? "#ffffff"
-                            : (HEX6.test(fillColorInput) ? fillColorInput : "#ffffff"); // fallback
-                          setPicker({
-                            for: "fill",
-                            x: rect.left + window.scrollX,
-                            y: rect.bottom + 6 + window.scrollY,
-                            initial: safeInitial,   // NEW
-                          });
-                        }}
-                        title="Pick fill color"
-                      />
-                    </div>
-                    {!noFill && !HEX_RE.test(fillColorInput) && (
-                      <div className="mt-1 text-xs text-red-600">Enter a valid hex like #66ccff or #6cf</div>
-                    )}
-                  </div>
-                  <div className="self-center text-xs text-gray-500">Preview</div>
-                </div>
-                {/* Text color */}
-                <div className="mb-3 grid grid-cols-[1fr_auto] items-end gap-3">
-                  <div>
-                    <label className="mb-1 block text-xs text-gray-600">Text color (hex)</label>
-                    <div className="flex items-center gap-3">
-                      <input
-                        className={`w-full rounded-md border px-2 py-1.5 text-sm outline-none ${HEX_RE.test(textColorInput) ? "border-gray-300 focus:border-blue-500" : "border-red-400 focus:border-red-500"}`}
-                        placeholder="#000000"
-                        value={textColorInput}
-                        onChange={(e) => setTextColorInput(e.target.value)}
-                        onFocus={() => setLastColorTarget("text")}
-                      />
-                      <button
-                        type="button"
-                        className="aspect-square w-12 rounded border border-gray-300"
-                        style={{
-                          background: HEX_RE.test(textColorInput)
-                            ? textColorInput
-                            : "repeating-conic-gradient(#ddd 0% 25%, #fff 0% 50%) 50%/10px 10px"
-                        }}
-                        onClick={(e) => {
-                          const rect = (e.currentTarget as HTMLButtonElement).getBoundingClientRect();
-                          setLastColorTarget("text");
-
-                          const safeInitial = HEX6.test(textColorInput) ? textColorInput : "#000000";
-                          setPicker({
-                            for: "text",
-                            x: rect.left + window.scrollX,
-                            y: rect.bottom + 6 + window.scrollY,
-                            initial: safeInitial,
-                          });
-                        }}
-                        title="Pick text color"
-                      />
-                    </div>
-                    {!HEX_RE.test(textColorInput) && (
-                      <div className="mt-1 text-xs text-red-600">Enter a valid hex like #000000 or #000</div>
-                    )}
-                  </div>
-                  <div className="self-center text-xs text-gray-500">Preview</div>
-                </div>
-                {/* Recent colors + target toggle */}
-                {recentColors.length > 0 && (
-                  <div className="mb-1 flex items-center gap-2 text-xs text-gray-600">
-                    <span>Recent colors</span>
-                    <div className="ml-auto flex gap-1">
-                      <button
-                        className={`rounded px-2 py-0.5 ${lastColorTarget === "stroke" ? "bg-gray-200" : "hover:bg-gray-100"}`}
-                        onClick={() => setLastColorTarget("stroke")}
-                        title="Apply to stroke"
-                      >
-                        Stroke
-                      </button>
-                      <button
-                        className={`rounded px-2 py-0.5 ${lastColorTarget === "fill" ? "bg-gray-200" : "hover:bg-gray-100"}`}
-                        onClick={() => setLastColorTarget("fill")}
-                        title="Apply to fill"
-                      >
-                        Fill
-                      </button>
-                      <button
-                        className={`rounded px-2 py-0.5 ${lastColorTarget === "text" ? "bg-gray-200" : "hover:bg-gray-100"}`}
-                        onClick={() => setLastColorTarget("text")}
-                        title="Apply to text"
-                      >
-                        Text
-                      </button>
-                    </div>
-                  </div>
-                )}
-                {recentColors.length > 0 && (
-                  <div className="mb-3 flex flex-wrap gap-2">
-                    {recentColors.map((c) => (
-                      <button
-                        key={c}
-                        className="aspect-square w-8 rounded border border-gray-300"
-                        style={{ background: c }}
-                        title={`${c} → ${lastColorTarget}`}
-                        onClick={() => {
-                          if (lastColorTarget === "stroke") setStrokeColorInput(c);
-                          else if (lastColorTarget === "fill") setFillColorInput(c);
-                          else setTextColorInput(c); // NEW
-                        }}
-                      />
-                    ))}
-                  </div>
-                )}
-
-                <div className="mt-2 flex items-center justify-end gap-2">
-                  <button className="rounded-md px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-100" onClick={closeModal}>Close</button>
-                  <button
-                    className="rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-                    onClick={saveStyle}
-                    disabled={
-                      !Number.isFinite(Number(strokeWidthInput)) ||
-                      Number(strokeWidthInput) <= 0 ||
-                      !HEX_RE.test(strokeColorInput) ||
-                      (!noFill && !HEX_RE.test(fillColorInput)) ||
-                      !HEX_RE.test(textColorInput) // NEW
-                    }
-                  >
-                    Save style
-                  </button>
-                </div>
-
-                {selectedIds.size > 0 && selectedIds.has(modalShapeId!) && (
-                  <div className="mt-1 text-xs text-gray-500">
-                    Applies to {selectedIds.size} selected shape{selectedIds.size > 1 ? "s" : ""}.
-                  </div>
-                )}
-              </div>
-
-              {/* Annotations */}
-              <div className="mt-6">
-                <h3 className="mb-2 text-sm font-medium">Annotations</h3>
-                <div className="max-h-48 overflow-auto rounded border border-gray-200">
-                  {anns.length === 0 ? (
-                    <div className="p-3 text-sm text-gray-500">No annotations yet.</div>
-                  ) : (
-                    <ul className="divide-y divide-gray-100">
-                      {anns
-                        .filter(a => a.text && a.text.trim().length > 0)
-                        .map(a => {
-                          const author = profiles.get(a.user_id) ?? a.user_id;
-                          const isMine = a.user_id === userId;
-                          return (
-                            <li key={a.id} className="p-3 text-sm">
-                              <div className="mb-1 flex items-center justify-between gap-2">
-                                <div className="font-medium">{author}</div>
-                                {isMine && (
-                                  <button
-                                    className="inline-flex h-6 min-w-[1.5rem] items-center justify-center rounded px-2 text-xs text-gray-500 hover:bg-gray-100 hover:text-gray-800"
-                                    aria-label="Delete annotation"
-                                    title="Delete annotation"
-                                    onClick={() => deleteAnnotation(a.id, a.shape_id)}
-                                  >✕</button>
-                                )}
-                              </div>
-                              <div className="whitespace-pre-wrap">{a.text}</div>
-                              <div className="mt-1 text-xs text-gray-400">{new Date(a.created_at).toLocaleString()}</div>
-                            </li>
-                          );
-                        })}
-                    </ul>
-                  )}
-                </div>
-
-                <div className="mt-3">
-                  <label className="mb-1 block text-xs text-gray-600">
-                    Add annotation (as {email})
-                  </label>
-                  {selectedIds.size > 0 && selectedIds.has(modalShapeId!) && (
-                    <div className="mb-1 text-xs text-gray-500">
-                      This note will be added to {selectedIds.size} selected shape{selectedIds.size > 1 ? "s" : ""}.
-                    </div>
-                  )}
-                  <textarea
-                    className="h-20 w-full rounded-md border border-gray-300 p-2 text-sm outline-none focus:border-blue-500"
-                    placeholder="Type a note…"
-                    value={annotationInput}
-                    onChange={(e) => setAnnotationInput(e.target.value)}
-                  />
-                  <div className="mt-2 flex items-center justify-end gap-2">
-                    <button className="rounded-md px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-100" onClick={closeModal}>Close</button>
-                    <button className="rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50" onClick={addAnnotation} disabled={!annotationInput.trim()}>Save annotation</button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
+          <ShapePropertiesModal
+            shape={s}
+            userEmail={email}
+            ownerEmail={ownerEmail}
+            annotations={anns}
+            profiles={profiles}
+            userId={userId}
+            selectedIds={selectedIds}
+            
+            sidesInput={sidesInput}
+            zIndexInput={zIndexInput}
+            strokeWidthInput={strokeWidthInput}
+            strokeColorInput={strokeColorInput}
+            fillColorInput={fillColorInput}
+            textColorInput={textColorInput}
+            noFill={noFill}
+            annotationInput={annotationInput}
+            lastColorTarget={lastColorTarget}
+            recentColors={recentColors}
+            
+            setSidesInput={setSidesInput}
+            setZIndexInput={setZIndexInput}
+            setStrokeWidthInput={setStrokeWidthInput}
+            setStrokeColorInput={setStrokeColorInput}
+            setFillColorInput={setFillColorInput}
+            setTextColorInput={setTextColorInput}
+            setNoFill={setNoFill}
+            setAnnotationInput={setAnnotationInput}
+            setLastColorTarget={setLastColorTarget}
+            
+            onClose={closeModal}
+            onSaveSides={saveSides}
+            onSaveZIndex={saveZIndex}
+            onSaveStyle={saveStyle}
+            onSendToFront={sendToFront}
+            onSendToBack={sendToBack}
+            onAddAnnotation={addAnnotation}
+            onDeleteAnnotation={deleteAnnotation}
+            onOpenColorPicker={(target, x, y, initial) => {
+              setPicker({ for: target, x, y, initial });
+            }}
+          />
         );
       })()}
       {/* Canvas Context Menu */}
-      <Portal>
-        {showCanvasMenu && canvasMenuPos && (
-          <div
-            ref={menuRef}
-            role="menu"
-            className="fixed z-[9999] rounded-xl shadow-2xl bg-white border border-gray-200"
-            style={{ left: canvasMenuPos.x, top: canvasMenuPos.y, minWidth: 280 }}
-            onMouseDown={(e) => e.stopPropagation()}
-            onClick={(e) => e.stopPropagation()}
-            onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
-          >
-            <div className="flex text-sm">
-              <button
-                className={`px-3 py-2 ${canvasMenuTab==='export' ? 'font-semibold border-b-2 border-blue-500' : 'text-gray-500'}`}
-                onClick={() => setCanvasMenuTab('export')}
-              >
-                Export
-              </button>
-              <button
-                className={`px-3 py-2 ${canvasMenuTab==='versions' ? 'font-semibold border-b-2 border-blue-500' : 'text-gray-500'}`}
-                onClick={() => setCanvasMenuTab('versions')}
-              >
-                Versions
-              </button>
-              <div className="ml-auto px-2 py-2">
-                <button className="text-gray-400 hover:text-gray-700" onClick={() => setShowCanvasMenu(false)}>✕</button>
-              </div>
-            </div>
-
-            {canvasMenuTab === 'export' && (
-              <div className="p-3 space-y-2">
-                <button className="w-full rounded-md border px-3 py-2 hover:bg-gray-50" onClick={exportAsPNG}>Download PNG</button>
-                <button className="w-full rounded-md border px-3 py-2 hover:bg-gray-50" onClick={exportAsSVG}>Download SVG</button>
-                <button className="w-full rounded-md border px-3 py-2 hover:bg-gray-50" onClick={exportAsJSON}>Download JSON (state)</button>
-              </div>
-            )}
-
-            {canvasMenuTab === 'versions' && (
-              <div className="p-3 space-y-3">
-                <div className="flex gap-2">
-                  <button className="flex-1 rounded-md border px-3 py-2 hover:bg-gray-50" onClick={saveCanvasVersion}>
-                    Save current version
-                  </button>
-                </div>
-                <div className="max-h-64 overflow-auto divide-y">
-                  {canvasVersions.length === 0 ? (
-                    <div className="text-sm text-gray-500 py-6 text-center">No versions yet.</div>
-                  ) : canvasVersions.map(v => (
-                    <div key={v.id} className="py-2 flex items-center justify-between gap-3">
-                      <div className="text-xs">
-                        <div className="font-medium">{new Date(v.created_at).toLocaleString()}</div>
-                        <div className="text-gray-500">by {v.created_by}</div>
-                      </div>
-                      <button
-                        className="rounded-md border px-2 py-1 text-xs hover:bg-gray-50"
-                        onClick={() => void restoreCanvasVersion(v.id)}
-                      >
-                        Restore
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-      </Portal>
+      <CanvasContextMenu
+        show={showCanvasMenu}
+        position={canvasMenuPos}
+        menuRef={menuRef}
+        activeTab={canvasMenuTab}
+        versions={canvasVersions}
+        onTabChange={setCanvasMenuTab}
+        onClose={() => setShowCanvasMenu(false)}
+        onExportPNG={exportAsPNG}
+        onExportSVG={exportAsSVG}
+        onExportJSON={exportAsJSON}
+        onSaveVersion={saveCanvasVersion}
+        onRestoreVersion={(versionId) => void restoreCanvasVersion(versionId)}
+      />
       {/* Debug HUD */}
-      {showDebug && (
-        <div className="absolute bottom-3 left-3 rounded bg-white/80 px-3 py-2 text-xs shadow">
-          <div>scroll: ({Math.round(offset.x)}, {Math.round(offset.y)})</div>
-          <div>zoom: {scale.toFixed(2)}×</div>
-          <div>cursorΔ: ({Math.round(cursor.dx)}, {Math.round(cursor.dy)})</div>
-          <div>sum: ({Math.round(offset.x + cursor.dx)}, {Math.round(offset.y + cursor.dy)})</div>
-          <div className="opacity-60">
-            Wheel pan • RMB pan • Ctrl/Cmd+Wheel zoom • LMB create/move • Perimeter drag = resize • Cmd/Ctrl+Perimeter drag = rotate • Dbl-click delete (sel=all) • Shift+Click select • Shift+Drag (bg) marquee • Cmd/Ctrl+C/X/V • RMB on shape → Properties • Click text to edit • RMB on background → Canvas menu • ? toggles HUD
-          </div>
-        </div>
-      )}
+      <DebugHUD visible={showDebug} offset={offset} scale={scale} cursor={cursor} />
       {/* Global Color Picker (always above) */}
       {picker && <Portal><div className="fixed left-2 top-2 z-[10000] bg-black text-white px-2 py-1">picker on</div></Portal>}
       {picker && (
@@ -3726,217 +3179,3 @@ export default function CanvasViewport({ userId }: Props) {
     </div>
   );
 }
-
-/* =========================
-   Color Picker (popover)
-   ========================= */
-// --- Robust full-HSV ColorPickerPopover (handles invalid initial) ---
-type ColorPickerPopoverProps = {
-  x: number;
-  y: number;
-  initial: string;                 // may be invalid; we'll coerce
-  recent: string[];
-  onClose: () => void;
-  onPick: (hex: string) => void;
-  onPickRecent: (hex: string) => void;
-};
-
-const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
-
-const ColorPickerPopover: React.FC<ColorPickerPopoverProps> = ({
-  x, y, initial, recent, onClose, onPick, onPickRecent,
-}) => {
-  // Coerce initial to a valid hex & HSV
-  const initHex = HEX6.test(initial) ? initial : "#000000";
-  const initRgb = hexToRgb(initHex)!;
-  const initHsv = rgbToHsv(initRgb.r, initRgb.g, initRgb.b);
-
-  const [h, setH] = useState(initHsv.h);     // 0..360
-  const [s, setS] = useState(initHsv.s);     // 0..1
-  const [v, setV] = useState(initHsv.v);     // 0..1
-  const [hex, setHex] = useState(initHex);
-
-  const svRef = useRef<HTMLDivElement | null>(null);
-  const hRef  = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    const next = hsvToHex(h, s, v);
-    setHex(next);
-    onPick(next); // live updates
-  }, [h, s, v, onPick]);
-
-  const startDragSV = (e: React.MouseEvent) => {
-    e.preventDefault();
-    const rect = svRef.current!.getBoundingClientRect();
-    const move = (ev: MouseEvent) => {
-      const nx = clamp01((ev.clientX - rect.left) / rect.width);       // S
-      const ny = clamp01(1 - (ev.clientY - rect.top) / rect.height);   // V
-      setS(nx); setV(ny);
-    };
-    const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up);
-    move(e.nativeEvent as unknown as MouseEvent);
-  };
-
-  const startDragH = (e: React.MouseEvent) => {
-    e.preventDefault();
-    const rect = hRef.current!.getBoundingClientRect();
-    const move = (ev: MouseEvent) => {
-      const ny = clamp01((ev.clientY - rect.top) / rect.height);
-      setH(ny * 360);
-    };
-    const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up);
-    move(e.nativeEvent as unknown as MouseEvent);
-  };
-
-  const setFromHex = (hexStr: string) => {
-    const rgb = hexToRgb(hexStr);
-    if (!rgb) return;
-    const nhsv = rgbToHsv(rgb.r, rgb.g, rgb.b);
-    setH(nhsv.h);
-    setS(nhsv.s);
-    setV(nhsv.v);
-    setHex(hexStr);
-    onPick(hexStr);           // notify parent with the new color
-  };
-
-  const hueGradient = {
-    background:
-      "linear-gradient(to bottom,#f00,#ff0,#0f0,#0ff,#00f,#f0f,#f00)"
-  };
-  const baseColor = hsvToHex(h, 1, 1);
-  const svBg = {
-    background: `
-      linear-gradient(to top, #000, rgba(0,0,0,0)),
-      linear-gradient(to right, #fff, ${baseColor})
-    `
-  };
-
-  const svMarkerStyle: React.CSSProperties = {
-    position: "absolute",
-    left: `${s * 100}%`,
-    bottom: `${v * 100}%`,
-    transform: "translate(-50%, 50%)",
-    width: 12, height: 12,
-    borderRadius: 9999,
-    border: "2px solid white",
-    boxShadow: "0 0 0 1px rgba(0,0,0,0.6)",
-    pointerEvents: "none",
-  };
-  const hMarkerStyle: React.CSSProperties = {
-    position: "absolute",
-    left: 0,
-    top: `calc(${(h / 360) * 100}% - 6px)`,
-    width: "100%",
-    height: 12,
-    border: "2px solid white",
-    boxShadow: "0 0 0 1px rgba(0,0,0,0.6)",
-    borderRadius: 6,
-    pointerEvents: "none",
-  };
-
-  return (
-    <div
-      data-test-id="color-picker-root"
-      className="fixed"
-      style={{
-        left: x,
-        top: y,
-        zIndex: 2147483647,
-        pointerEvents: "auto",
-      }}
-      onMouseDown={(e) => e.stopPropagation()}
-    >
-      <div
-        className="rounded-xl bg-white p-3 shadow-2xl ring-1 ring-black/10"
-        // don't rely on w-[320px]
-        style={{ width: 320 }}
-      >
-        {/* Preview + hex */}
-        <div className="mb-3 flex items-center gap-3">
-          <div className="aspect-square w-10 rounded border border-gray-300" style={{ background: hex }} title={hex} />
-          <input
-            className="h-9 grow rounded border border-gray-300 px-2 text-sm outline-none focus:border-blue-500 font-mono"
-            value={hex}
-            onChange={(e) => {
-              const v = e.target.value.trim();
-              if (HEX6.test(v)) {
-                const rgb = hexToRgb(v)!;
-                const nhsv = rgbToHsv(rgb.r, rgb.g, rgb.b);
-                setH(nhsv.h); setS(nhsv.s); setV(nhsv.v);
-                setHex(v);
-                onPick(v);
-              } else {
-                setHex(v);
-              }
-            }}
-            onBlur={() => {
-              if (!HEX6.test(hex)) setHex(hsvToHex(h, s, v));
-            }}
-            placeholder="#RRGGBB"
-          />
-          <button className="rounded px-2 py-1 text-sm text-gray-600 hover:bg-gray-100" onClick={onClose}>Close</button>
-        </div>
-
-        {/* SV + Hue */}
-        <div className="flex gap-3">
-          <div
-            ref={svRef}
-            onMouseDown={startDragSV}
-            className="relative cursor-crosshair rounded-md"
-            style={{
-              width: 192,   // 48 * 4
-              height: 192,  // 48 * 4
-              background: `
-                linear-gradient(to top, #000, rgba(0,0,0,0)),
-                linear-gradient(to right, #fff, ${baseColor})
-              `,
-            }}
-          >
-            <div style={svMarkerStyle} />
-          </div>
-
-          <div
-            ref={hRef}
-            onMouseDown={startDragH}
-            className="relative cursor-pointer rounded-md"
-            style={{
-              width: 24,    // ~w-6
-              height: 192,  // match SV height
-              background: "linear-gradient(to bottom,#f00,#ff0,#0f0,#0ff,#00f,#f0f,#f00)",
-            }}
-          >
-            <div style={hMarkerStyle} />
-          </div>
-        </div>
-
-        {/* Recent */}
-        {recent.length > 0 && (
-          <>
-            <div className="mt-3 text-xs text-gray-500">Recent colors</div>
-            <div className="mt-2 flex flex-wrap gap-2">
-              {recent.map((c) => (
-                <button
-                  key={c}
-                  className="aspect-square w-8 rounded border border-gray-300"
-                  style={{ background: c }}
-                  title={c}
-                  onClick={() => {
-                    // Update internal HSV first so the useEffect emits the same color,
-                    // preventing the “revert” from old (h,s,v).
-                    setFromHex(c);
-                    // (Optional) still inform parent it came from "recent" specifically:
-                    onPickRecent(c);
-                  }}
-                />
-              ))}
-            </div>
-          </>
-        )}
-      </div>
-    </div>
-  );
-};
